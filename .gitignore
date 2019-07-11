@@ -1,0 +1,75 @@
+# Ignore all files using an opt-inn approach
+*
+
+# Add .gitignore and .gitattributes
+!.gitignore
+!.gitattributes
+
+# Add license
+!LICENSE.txt
+
+# Add todo list
+!ToDo.txt
+
+# Add md files
+!*.md
+
+# Add fsx files
+!*.fsx
+
+# Add command and batch files
+!*.cmd
+!*.sh
+
+# ignore release and publish nuget commands
+release.cmd
+publishnuget.cmd
+
+# Add Docker files
+!Dockerfile
+!.dockerignore
+
+# Add paket 
+!/.paket/
+!/.paket/paket.exe
+!/.paket/*.targets
+
+# Ignore paket load
+/.paket/load/
+
+# Add dependencies file
+!paket.dependencies
+!paket.lock
+!paket.references
+!paket.template
+
+# Add yml files to ci on appveyor and travis
+!appveyor.yml
+!.travis.yml
+
+# Add solution file
+!*.sln
+
+# Add fsharp project files
+!*.fsproj
+
+# Add configurarion files
+!*app.config
+
+# Add fsharp source files
+!*.fs
+!*.fsx
+
+# Add source files
+!/scripts/
+!/src/
+
+# Add test files
+!/tests/
+
+# Ignore generated documentation files
+/docs/content/**/*.md
+
+# Add documentation
+!/docs/
+
