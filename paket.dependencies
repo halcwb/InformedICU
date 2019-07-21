@@ -1,3 +1,8 @@
-source https://www.nuget.org/api/v2
+﻿source https://www.nuget.org/api/v2
 
 nuget Expecto
+nuget Expecto.BenchmarkDotNet
+nuget Expecto.FsCheck
+nuget Expecto.Hopac
+nuget Npgsql.FSharp
+nuget Thoth.Json.Net
