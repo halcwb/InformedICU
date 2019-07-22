@@ -681,7 +681,20 @@ module Infrastructure =
             {
               Handle = choice queryHandlers
             }
+            
+        module Tests =
 
+            let handler : QueryHandler<string> =
+                [
+                    { Handle = fun _ -> async { printf "not handled "; return NotHandled } }
+                    { Handle = fun _ -> async { printf "not handled "; return NotHandled } }
+                    { Handle = fun _ -> async { printf "not handled "; return NotHandled } }
+                    { Handle = fun x -> async { return x |> box |> Handled } }
+                ]
+                |> initialize
+
+            let run () =
+                handler.Handle "Finally handled"
 
 
     module CommandHandler =
@@ -737,3 +750,36 @@ module Infrastructure =
                 Handle = fun source command -> agent.PostAndAsyncReply (fun reply -> Handle (source,command,reply))
                 OnError = agent.OnError
             }
+
+        module Tests =
+
+            type Command = HelloWordCommand of string
+
+            type Event = HelloWordEvent of string
+
+            // create an event store for the hello world event
+            let store : EventStore<Event> = 
+                InMemoryStorage.initialize ()
+                |> EventStore.initialize
+               
+            let behaviour : Behaviour<Command, Event> =
+                fun cmd _ ->
+                    match cmd with
+                    | HelloWordCommand s ->
+                        HelloWordEvent s
+                        |> List.replicate 10
+
+            let handler =
+                initialize behaviour store
+
+            let run () =
+                let source = System.Guid.NewGuid()
+                "Hello World"
+                |> HelloWordCommand
+                |> handler.Handle source
+                |> Async.RunSynchronously
+                |> printfn "%A"
+
+                store.Get ()
+                |> Async.RunSynchronously
+                |> Helper.printEvents "Events"
