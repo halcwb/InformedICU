@@ -805,6 +805,7 @@ module Domain =
                 FirstName = fn
                 BirthDate = bd
             }
+            
 
         module Projections =
 
@@ -823,6 +824,21 @@ module Domain =
                 }
                 |> Projection.project
 
+            let admittedPatients events =
+                let registered = 
+                    events 
+                    |> registerdPatients
+                    |> Set.toList
+                events
+                |> List.fold (fun acc e ->
+                    match e with
+                    | Admitted hn ->
+                        match registered 
+                              |> List.tryFind (fun pat -> pat.HospitalNumber = hn) with
+                        | Some pat -> acc |> List.append [ pat ]
+                        | None -> acc
+                    | _ -> acc
+                ) []
 
             module Tests =
 
@@ -841,14 +857,25 @@ module Domain =
                         create "3" "LastName" "FirstName" DateTime.Now   
                     ]
                     |> List.map Registered
+                    |> List.append [ "1" |> Admitted ]
                     |> EventEnvelope.enveloped source
                     |> store.Append
                     |> ignore
 
-                    // get the set of registerd patients
+                    // get the registered patients
                     store.GetStream source
                     |> Async.RunSynchronously
                     |> Result.map (EventEnvelope.asEvents >> registerdPatients)
+                    |> Result.map (fun set -> set |> Set.iter (printfn "%A"))
+                    |> ignore
+
+                    // get admitted patients
+                    store.GetStream source
+                    |> Async.RunSynchronously
+                    |> Result.map (EventEnvelope.asEvents >> admittedPatients)
+                    |> Result.map (fun pats -> pats |> List.iter (printfn "%A"))
+                    |> ignore
+
 
 
         module Behavirour =
