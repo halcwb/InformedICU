@@ -54,12 +54,11 @@ module Option =
         None |> twice       // returns None
 
 
-/// A wrapper for MailboxProcessor that catches all unhandled exceptions
-/// and reports them via the 'OnError' event. Otherwise, the API
-/// is the same as the API of 'MailboxProcessor'
-
 module Infrastructure =
 
+    /// A wrapper for MailboxProcessor that catches all unhandled exceptions
+    /// and reports them via the 'OnError' event. Otherwise, the API
+    /// is the same as the API of 'MailboxProcessor'
     type Agent<'T>(f: Agent<'T> -> Async<unit>) as self =
         // Create an event for reporting errors
         let errorEvent = Event<_>()
@@ -93,28 +92,38 @@ module Infrastructure =
             agent.Start()
             agent
 
+    /// The aggregate id for a list of events
     type EventSource = System.Guid
 
+    /// Produces a new list of events based on
+    /// a list of previous events
     type EventProducer<'Event> =
         'Event list -> 'Event list
 
+    /// Store te event metadata like the
+    /// aggregate id and the creation time
     type EventMetadata =
         {
             Source : EventSource
             RecordedAtUtc : System.DateTime
         }
 
+    /// Wrapper for an event with meta data
     type EventEnvelope<'Event> =
         {
             Metadata : EventMetadata
             Event : 'Event
         }
 
+    /// Process a list of event envelopes in a 
+    /// asynchronous way.
     type EventHandler<'Event> =
         EventEnvelope<'Event> list -> Async<unit>
 
+    
     type EventResult<'Event> =
         Result<EventEnvelope<'Event> list, string>
+
 
     type EventStore<'Event> =
         {
@@ -230,7 +239,7 @@ module Infrastructure =
               printError (sprintf "Command Error: %s" error) ""
 
             waitForAnyKey()
-
+           
 
     type EventSourcedConfig<'Comand,'Event,'Query> =
         {
@@ -271,6 +280,30 @@ module Infrastructure =
 
         member __.GetStream eventSource =
             eventStore.GetStream eventSource
+
+    module EventEnvelope =
+
+        let enveloped source events =
+            let now = System.DateTime.UtcNow
+            let envelope event =
+                {
+                    Metadata = {
+                        Source = source
+                        RecordedAtUtc = now
+                        }
+                    Event = event
+                }
+
+            events |> List.map envelope
+
+        let asEvents eventEnvelopes =
+            eventEnvelopes |> List.map (fun envelope -> envelope.Event)
+
+
+    module Projection =
+        
+        let project projection events =
+            events |> List.fold projection.Update projection.Init
 
 
     module FileStorage =
@@ -358,29 +391,16 @@ module Infrastructure =
             }
 
         module Tests =
-
+    
             type Event = | HelloWorld
 
             let storage : EventStorage<Event> = initialize()
-
-            let private enveloped source events =
-                let now = System.DateTime.UtcNow
-                let envelope event =
-                    {
-                        Metadata = {
-                            Source = source
-                            RecordedAtUtc = now
-                            }
-                        Event = event
-                    }
-
-                events |> List.map envelope
 
             let run () =
                 let source = System.Guid.NewGuid ()
                 HelloWorld 
                 |> List.replicate 10
-                |> enveloped source
+                |> EventEnvelope.enveloped source
                 |> storage.Append
                 |> ignore
 
@@ -537,34 +557,20 @@ module Infrastructure =
 
             // will print out received event envelopes
             store.OnEvents.Add (printfn "Received: %A")
-
-            // create event envelopes for events belonging to a source
-            let private enveloped source events =
-                let now = System.DateTime.UtcNow
-                let envelope event =
-                    {
-                        Metadata = {
-                            Source = source
-                            RecordedAtUtc = now
-                            }
-                        Event = event
-                    }
-
-                events |> List.map envelope
-
+            
             // run the tests
             let run () =
                 let source = System.Guid.NewGuid ()
                 HelloWorld
                 |> List.replicate 5
-                |> enveloped source
+                |> EventEnvelope.enveloped source
                 |> store.Append
                 |> ignore
 
                 let source = System.Guid.NewGuid ()
                 HelloWorld
                 |> List.replicate 5
-                |> enveloped source
+                |> EventEnvelope.enveloped source
                 |> store.Append
                 |> ignore
                 
@@ -619,22 +625,6 @@ module Infrastructure =
 
         module Tests =
 
-            // create event envelopes for events belonging to a source
-            let private enveloped events =
-                let source = System.Guid.NewGuid ()
-                let now = System.DateTime.UtcNow
-                let envelope event =
-                    {
-                        Metadata = {
-                            Source = source
-                            RecordedAtUtc = now
-                            }
-                        Event = event
-                    }
-
-                events |> List.map envelope
-
-
             type Event = HelloWorld
 
             let listener : EventListener<Event> = initialize()
@@ -643,7 +633,7 @@ module Infrastructure =
                 async { return printfn "Handled: %A" ees }
 
             let events =
-                [ HelloWorld ] |> enveloped
+                [ HelloWorld ] |> EventEnvelope.enveloped (System.Guid.NewGuid ())
 
             let run () =
                 // no handlers, nothing happens
@@ -698,23 +688,7 @@ module Infrastructure =
 
 
     module CommandHandler =
-
-        let private asEvents eventEnvelopes =
-            eventEnvelopes |> List.map (fun envelope -> envelope.Event)
-
-        let private enveloped source events =
-            let now = System.DateTime.UtcNow
-            let envelope event =
-                {
-                    Metadata = {
-                        Source = source
-                        RecordedAtUtc = now
-                        }
-                    Event = event
-                }
-
-            events |> List.map envelope
-
+                        
         type Msg<'Command> =
             | Handle of EventSource * 'Command * AsyncReplyChannel<Result<unit,string>>
 
@@ -729,7 +703,10 @@ module Infrastructure =
                             let! stream = eventSource |> eventStore.GetStream
 
                             let newEvents =
-                                stream |> Result.map (asEvents >> behaviour command >> enveloped eventSource)
+                                stream 
+                                |> Result.map (EventEnvelope.asEvents 
+                                               >> behaviour command 
+                                               >> EventEnvelope.enveloped eventSource)
 
                             let! result =
                                 newEvents
@@ -761,19 +738,22 @@ module Infrastructure =
             let store : EventStore<Event> = 
                 InMemoryStorage.initialize ()
                 |> EventStore.initialize
-               
+
             let behaviour : Behaviour<Command, Event> =
-                fun cmd _ ->
+                fun cmd ees ->
                     match cmd with
-                    | HelloWordCommand s ->
-                        HelloWordEvent s
-                        |> List.replicate 10
+                    | HelloWordCommand s -> 
+                        if ees |> List.length >= 1 then []
+                        else
+                            HelloWordEvent s
+                            |> List.replicate 2
 
             let handler =
                 initialize behaviour store
 
             let run () =
                 let source = System.Guid.NewGuid()
+
                 "Hello World"
                 |> HelloWordCommand
                 |> handler.Handle source
@@ -783,3 +763,157 @@ module Infrastructure =
                 store.Get ()
                 |> Async.RunSynchronously
                 |> Helper.printEvents "Events"
+
+                "Hello World"
+                |> HelloWordCommand
+                |> handler.Handle source
+                |> Async.RunSynchronously
+                |> printfn "%A"
+
+                store.Get ()
+                |> Async.RunSynchronously
+                |> Helper.printEvents "Events"
+
+
+module Domain =
+
+    open System
+
+    type HospitalNumber = string
+
+    type Patient =
+        {
+            HospitalNumber : HospitalNumber
+            LastName : string
+            FirstName : string
+            BirthDate : DateTime
+        }
+        
+    module Patient =
+
+        type Event =
+            | Registered of Patient
+            | AllReadyRegistered of HospitalNumber
+            | Admitted of HospitalNumber
+            | Discharged of HospitalNumber
+            | UnknownHospitalNumber of HospitalNumber
+
+        let create hn ln fn bd : Patient =
+            {
+                HospitalNumber = hn
+                LastName = ln
+                FirstName = fn
+                BirthDate = bd
+            }
+
+        module Projections =
+
+            open Infrastructure
+
+            let updateRegisteredPatients (set: Set<_>) event =
+                match event with
+                | Registered pat ->
+                    pat |> set.Add
+                | _ -> set
+
+            let registerdPatients =
+                {
+                    Init = Set.empty
+                    Update = updateRegisteredPatients
+                }
+                |> Projection.project
+
+
+            module Tests =
+
+                open Infrastructure
+
+                let store : EventStore<Event> =
+                    InMemoryStorage.initialize ()
+                    |> EventStore.initialize
+
+                let run () =
+                    let source = System.Guid.NewGuid ()
+                    // add some registered patient events to the store
+                    [
+                        create "1" "LastName" "FirstName" DateTime.Now
+                        create "2" "LastName" "FirstName" DateTime.Now
+                        create "3" "LastName" "FirstName" DateTime.Now   
+                    ]
+                    |> List.map Registered
+                    |> EventEnvelope.enveloped source
+                    |> store.Append
+                    |> ignore
+
+                    // get the set of registerd patients
+                    store.GetStream source
+                    |> Async.RunSynchronously
+                    |> Result.map (EventEnvelope.asEvents >> registerdPatients)
+
+
+        module Behavirour =
+
+            let registerPatient hn ln fn bd events = 
+                let pat = create hn ln fn bd
+
+                if events |> Projections.registerdPatients |> Set.contains pat then 
+                    AllReadyRegistered hn
+                else 
+                    pat |> Registered
+                |> List.singleton
+
+            module Tests =
+
+                open Infrastructure
+
+                type Command = TestRegisterPatient
+                
+                // create an event store for the hello world event
+                let store : EventStore<Event> = 
+                    InMemoryStorage.initialize ()
+                    |> EventStore.initialize
+
+                let behaviour : Behaviour<Command, Event> =
+                    fun cmd ees ->
+                        match cmd with
+                        | TestRegisterPatient -> 
+                            ees
+                            |> registerPatient "1" "Test" "Test" (new DateTime(1965, 12, 7))
+
+                let handler =
+                    CommandHandler.initialize behaviour store
+
+                let run () =
+                    let source = System.Guid.NewGuid()
+
+                    TestRegisterPatient
+                    |> handler.Handle source
+                    |> Async.RunSynchronously
+                    |> printfn "%A"
+
+                    store.Get ()
+                    |> Async.RunSynchronously
+                    |> Helper.printEvents "Events"
+
+                    TestRegisterPatient
+                    |> handler.Handle source
+                    |> Async.RunSynchronously
+                    |> printfn "%A"
+
+                    store.Get ()
+                    |> Async.RunSynchronously
+                    |> Helper.printEvents "Events"
+
+
+module App =
+
+    open Domain
+
+    module Patient =
+
+        type Command =
+            | Register of Patient
+            | Admit of HospitalNumber
+            | Discharge of HospitalNumber
+
+        
