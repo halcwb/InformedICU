@@ -120,11 +120,16 @@ module Infrastructure =
     type EventHandler<'Event> =
         EventEnvelope<'Event> list -> Async<unit>
 
-    
+    /// The event result is either a list of 
+    /// event envelopes if successfull or an
+    /// string with the error.
     type EventResult<'Event> =
         Result<EventEnvelope<'Event> list, string>
 
-
+    /// The event store, stores the event envelopes
+    /// in streams identified by the `EventSource`.
+    /// It can have error listeners and/or event envelope
+    /// list listeners (for appended lists).
     type EventStore<'Event> =
         {
             Get : unit -> Async<EventResult<'Event>>
@@ -134,12 +139,16 @@ module Infrastructure =
             OnEvents : IEvent<EventEnvelope<'Event> list>
         }
 
+    /// An event listener can act upon each appended list
+    /// of event envelopes to the event store.
     type EventListener<'Event> =
         {
             Subscribe : EventHandler<'Event> -> unit
             Notify : EventEnvelope<'Event> list -> unit
         }
 
+    /// The event storage takes care of the persistence of
+    /// of event envelopes.
     type EventStorage<'Event> =
         {
             Get : unit -> Async<EventResult<'Event>>
@@ -147,6 +156,8 @@ module Infrastructure =
             Append : EventEnvelope<'Event> list -> Async<unit>
         }
 
+    /// A projection calculates the current state from
+    /// the update with an event with the previous state
     type Projection<'State,'Event> =
         {
             Init : 'State
@@ -209,7 +220,7 @@ module Infrastructure =
 
             | Error error -> printError (sprintf "Error when retrieving events: %s" error) ""
 
-            waitForAnyKey()
+            // waitForAnyKey()
 
         let runAsync asnc =
             asnc |> Async.RunSynchronously
@@ -227,7 +238,7 @@ module Infrastructure =
             | QueryResult.QueryError error ->
                 printError (sprintf "Query Error: %s" error) ""
 
-            waitForAnyKey()
+            // waitForAnyKey()
 
 
         let printCommandResults header result =
@@ -238,7 +249,7 @@ module Infrastructure =
             | Error error ->
               printError (sprintf "Command Error: %s" error) ""
 
-            waitForAnyKey()
+            // waitForAnyKey()
            
 
     type EventSourcedConfig<'Comand,'Event,'Query> =
@@ -250,6 +261,7 @@ module Infrastructure =
             EventListenerInit : unit -> EventListener<'Event>
             EventHandlers : EventHandler<'Event> list
         }
+
 
     type EventSourced<'Comand,'Event,'Query> (configuration : EventSourcedConfig<'Comand,'Event,'Query>) =
 
@@ -281,6 +293,24 @@ module Infrastructure =
         member __.GetStream eventSource =
             eventStore.GetStream eventSource
 
+
+    module EventSourced =
+
+        let private apply f (x: EventSourced<_, _, _>) = x |> f
+
+        let private get x = apply id x
+
+        let fromConfig config = new EventSourced<_, _, _>(config)
+
+        let handleCommand evs = (evs |> get).HandleCommand
+
+        let handleQuery evs = (evs |> get).HandleQuery
+
+        let getAllEvents evs = (evs |> get).GetAllEvents
+
+        let getStream evs = (evs |> get).GetStream
+
+
     module EventEnvelope =
 
         let enveloped source events =
@@ -304,6 +334,14 @@ module Infrastructure =
         
         let project projection events =
             events |> List.fold projection.Update projection.Init
+
+        let intoMap projection =
+            fun state eventEnvelope ->
+                state
+                |> Map.tryFind eventEnvelope.Metadata.Source
+                |> Option.defaultValue projection.Init
+                |> fun projectionState -> eventEnvelope.Event |> projection.Update projectionState
+                |> fun newState -> state |> Map.add eventEnvelope.Metadata.Source newState
 
 
     module FileStorage =
@@ -351,8 +389,8 @@ module Infrastructure =
         let private streamFor source history =
             history |> List.filter (fun ee -> ee.Metadata.Source = source)
 
-        let initialize () : EventStorage<'Event> =
-            let history : EventEnvelope<'Event> list = []
+        let initialize history : EventStorage<'Event> =
+//            let history : EventEnvelope<'Event> list = []
 
             let proc (inbox : Agent<Msg<_>>) =
                 let rec loop history =
@@ -407,6 +445,8 @@ module Infrastructure =
                 storage.GetStream source
                 |> Async.RunSynchronously
                 |> Helper.printEvents "Stored events in storage:"
+
+
 
     //module PostgresStorage =
 
@@ -648,6 +688,7 @@ module Infrastructure =
                 events 
                 |> listener.Notify
 
+
     module QueryHandler =
 
         let rec private choice (queryHandler : QueryHandler<_> list) query =
@@ -775,6 +816,46 @@ module Infrastructure =
                 |> Helper.printEvents "Events"
 
 
+    module ReadModel =
+
+        type Msg<'Event,'Result> =
+            | Notify of EventEnvelope<'Event> list * AsyncReplyChannel<unit>
+            | State of AsyncReplyChannel<'Result>
+
+        let inMemory (updateState : 'State -> EventEnvelope<'Event> list -> 'State) 
+                     (initState : 'State) : ReadModel<'Event, 'State> =
+            let agent =
+                let eventSubscriber (inbox : Agent<Msg<_,_>>) =
+                    let rec loop state =
+                        async {
+                        let! msg = inbox.Receive()
+
+                        match msg with
+                        | Notify (eventEnvelopes, reply) ->
+                            printfn "Readmodel got %i envelopes" (eventEnvelopes |> List.length)
+                            reply.Reply ()
+                            return! loop (eventEnvelopes |> updateState state)
+
+                        | State reply ->
+                            reply.Reply state
+                            return! loop state
+                        }
+
+                    loop initState
+
+                Agent<Msg<_,_>>.Start(eventSubscriber)
+
+            {
+                EventHandler = fun eventEnvelopes -> agent.PostAndAsyncReply(fun reply -> Notify (eventEnvelopes,reply))
+                State = fun () -> agent.PostAndAsyncReply State
+            }
+
+        module Tests =
+
+        
+            let run () = ()
+
+
 module Domain =
 
     open System
@@ -791,12 +872,6 @@ module Domain =
         
     module Patient =
 
-        type Event =
-            | Registered of Patient
-            | AllReadyRegistered of HospitalNumber
-            | Admitted of HospitalNumber
-            | Discharged of HospitalNumber
-            | UnknownHospitalNumber of HospitalNumber
 
         let create hn ln fn bd : Patient =
             {
@@ -805,7 +880,47 @@ module Domain =
                 FirstName = fn
                 BirthDate = bd
             }
-            
+
+        type Dto () = 
+            member val HospitalNumber  = "" with get, set
+            member val LastName = "" with get, set
+            member val FirstName = "" with get, set
+            member val BirthDate : DateTime Option = None with get, set
+
+        module Dto = 
+
+            let dto () = new Dto () 
+
+            let toDto (pat : Patient) =
+                let dto = dto ()
+                dto.HospitalNumber <- pat.HospitalNumber
+                dto.FirstName <- pat.FirstName
+                dto.LastName <- pat.LastName
+                dto.BirthDate <- pat.BirthDate |> Some
+                dto
+
+            let fromDto (dto : Dto) =
+                match dto.BirthDate with
+                | Some bd  ->
+                    create dto.HospitalNumber
+                           dto.LastName
+                           dto.FirstName
+                           bd
+                    |> Some
+                | None -> None
+
+        type Command =
+            | Register of Dto
+            | Admit of HospitalNumber
+            | Discharge of HospitalNumber
+
+        type Event =
+            | Registered of Patient
+            | InvalidPatient of Dto
+            | AllReadyRegistered of HospitalNumber
+            | Admitted of HospitalNumber
+            | Discharged of HospitalNumber
+            | UnknownHospitalNumber of HospitalNumber
 
         module Projections =
 
@@ -822,13 +937,13 @@ module Domain =
                     Init = Set.empty
                     Update = updateRegisteredPatients
                 }
-                |> Projection.project
 
             let admittedPatients events =
                 let registered = 
                     events 
-                    |> registerdPatients
+                    |> (Projection.project registerdPatients)
                     |> Set.toList
+
                 events
                 |> List.fold (fun acc e ->
                     match e with
@@ -865,7 +980,7 @@ module Domain =
                     // get the registered patients
                     store.GetStream source
                     |> Async.RunSynchronously
-                    |> Result.map (EventEnvelope.asEvents >> registerdPatients)
+                    |> Result.map (EventEnvelope.asEvents >> (Projection.project registerdPatients))
                     |> Result.map (fun set -> set |> Set.iter (printfn "%A"))
                     |> ignore
 
@@ -877,17 +992,42 @@ module Domain =
                     |> ignore
 
 
+        module ReadModels =
 
-        module Behavirour =
+            open Infrastructure
 
-            let registerPatient hn ln fn bd events = 
-                let pat = create hn ln fn bd
+            let registered () : ReadModel<_, _> =
+                let updateState state evs =
+                    evs
+                    |> List.fold (Projection.intoMap Projections.registerdPatients) state
 
-                if events |> Projections.registerdPatients |> Set.contains pat then 
-                    AllReadyRegistered hn
+                ReadModel.inMemory updateState Map.empty
+
+
+        module Behaviour =
+
+            open Infrastructure
+
+            let registerPatient pat events = 
+
+                if events 
+                   |> (Projection.project Projections.registerdPatients) 
+                   |> Set.contains pat then 
+                    AllReadyRegistered pat.HospitalNumber
                 else 
                     pat |> Registered
                 |> List.singleton
+
+            let behaviour : Behaviour<Command, Event> =
+                fun cmd evs ->
+                    match cmd with
+                    | Register dto -> 
+                        match dto |> Dto.fromDto with
+                        | Some pat -> 
+                            evs
+                            |> registerPatient pat
+                        | None -> [ dto |> InvalidPatient ]
+                    | _ -> "Not implemented yet" |> exn |> raise
 
             module Tests =
 
@@ -897,7 +1037,7 @@ module Domain =
                 
                 // create an event store for the hello world event
                 let store : EventStore<Event> = 
-                    InMemoryStorage.initialize ()
+                    InMemoryStorage.initialize []
                     |> EventStore.initialize
 
                 let behaviour : Behaviour<Command, Event> =
@@ -905,10 +1045,17 @@ module Domain =
                         match cmd with
                         | TestRegisterPatient -> 
                             ees
-                            |> registerPatient "1" "Test" "Test" (new DateTime(1965, 12, 7))
+                            |> registerPatient (create "1" "Test" "Test" (new DateTime(1965, 12, 7)))
 
                 let handler =
                     CommandHandler.initialize behaviour store
+
+                let listener = EventListener.initialize ()
+
+                store.OnEvents.Add listener.Notify
+
+                let readModel = ReadModels.registered ()
+                readModel.EventHandler |> listener.Subscribe
 
                 let run () =
                     let source = System.Guid.NewGuid()
@@ -931,16 +1078,35 @@ module Domain =
                     |> Async.RunSynchronously
                     |> Helper.printEvents "Events"
 
+                    readModel.State ()
+                    |> Async.RunSynchronously
+                    |> Map.iter (fun s p -> printfn "%A" p)
+
+
 
 module App =
 
-    open Domain
-
     module Patient =
 
-        type Command =
-            | Register of Patient
-            | Admit of HospitalNumber
-            | Discharge of HospitalNumber
+        open Infrastructure 
+        open Domain
 
-        
+        let store : EventStore<Patient.Event> = 
+            InMemoryStorage.initialize []
+            |> EventStore.initialize
+
+
+        let handler =
+            CommandHandler.initialize Patient.Behaviour.behaviour store
+
+        let listener = EventListener.initialize ()
+
+        store.OnEvents.Add listener.Notify
+
+        let readModel = Patient.ReadModels.registered ()
+        readModel.EventHandler |> listener.Subscribe
+
+
+
+Domain.Patient.Behaviour.Tests.run ()
+
