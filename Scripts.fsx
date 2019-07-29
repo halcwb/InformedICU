@@ -320,6 +320,7 @@ module Infrastructure =
 
             open System.IO
             open Thoth.Json.Net
+            open Extenstions
 
             let private get store =
                 store
@@ -985,6 +986,7 @@ module Domain =
             module Tests =
 
                 open Infrastructure
+                open Extenstions
 
                 let store : EventStore<Event> =
                     EventStorage.InMemoryStorage.initialize []
@@ -1088,6 +1090,7 @@ module Domain =
             module Tests =
 
                 open Infrastructure
+                open Extenstions
 
                 type Command = TestRegisterPatient
                 
@@ -1101,7 +1104,8 @@ module Domain =
                         match cmd with
                         | TestRegisterPatient -> 
                             ees
-                            |> registerPatient (create "1" "Test" "Test" (new DateTime(1965, 12, 7)) |> Result.get)
+                            |> registerPatient (create "1" "Test" "Test" (new DateTime(1965, 12, 7)) 
+                                                |> Result.get)
 
                 let handler =
                     CommandHandler.initialize behaviour store
@@ -1173,9 +1177,9 @@ open Infrastructure
 open Domain
 
 let dto = Patient.Dto.dto ()
-dto.HospitalNumber <- "1"
-dto.FirstName <- "Test"
-dto.LastName <- "Test"
+dto.HospitalNumber <- "2"
+dto.FirstName <- "Test2"
+dto.LastName <- "Test2"
 dto.BirthDate <- DateTime.Now.AddDays(-200.) |> Some
 
 
@@ -1188,7 +1192,6 @@ dto
 App.Patient.app.GetStream "patients"
 |> Async.RunSynchronously
 |> Helper.printEvents "Patients Steam"
-
 
 App.Patient.app.GetAllEvents ()
 |> Async.RunSynchronously
