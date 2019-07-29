@@ -178,10 +178,9 @@ module Infrastructure =
         | NotHandled
         | QueryError of string
 
-    type  QueryHandler<'Query> =
-        {
-            Handle : 'Query -> Async<QueryResult>
-        }
+
+    type QueryHandler<'Query> =
+        'Query -> Async<QueryResult>
 
     type ReadModel<'Event, 'State> =
       {
@@ -651,7 +650,7 @@ module Infrastructure =
             async {
                 match queryHandler with
                 | handler :: rest ->
-                    match! handler.Handle query with
+                    match! handler query with
                     | NotHandled ->
                         return! choice rest query
 
@@ -665,23 +664,21 @@ module Infrastructure =
             }
 
         let initialize queryHandlers : QueryHandler<_> =
-            {
-              Handle = choice queryHandlers
-            }
+            choice queryHandlers
             
         module Tests =
 
             let handler : QueryHandler<string> =
                 [
-                    { Handle = fun _ -> async { printf "not handled "; return NotHandled } }
-                    { Handle = fun _ -> async { printf "not handled "; return NotHandled } }
-                    { Handle = fun _ -> async { printf "not handled "; return NotHandled } }
-                    { Handle = fun x -> async { return x |> box |> Handled } }
+                    fun _ -> async { printf "not handled "; return NotHandled }
+                    fun _ -> async { printf "not handled "; return NotHandled }
+                    fun _ -> async { printf "not handled "; return NotHandled }
+                    fun x -> async { return x |> box |> Handled }
                 ]
                 |> initialize
 
             let run () =
-                handler.Handle "Finally handled"
+                handler "Finally handled"
 
 
     module CommandHandler =
@@ -791,10 +788,9 @@ module Infrastructure =
                         let! msg = inbox.Receive()
 
                         match msg with
-                        | Notify (eventEnvelopes, reply) ->
-                            printfn "Readmodel got %i envelopes" (eventEnvelopes |> List.length)
+                        | Notify (events, reply) ->
                             reply.Reply ()
-                            return! loop (eventEnvelopes |> updateState state)
+                            return! loop (events |> updateState state)
 
                         | State reply ->
                             reply.Reply state
@@ -848,7 +844,7 @@ module Infrastructure =
             commandHandler.Handle eventSource command
 
         member __.HandleQuery query =
-            queryHandler.Handle query
+            queryHandler query
 
         member __.GetAllEvents () =
             eventStore.Get()
@@ -872,6 +868,7 @@ module Infrastructure =
         let getAllEvents evs = (evs |> get).GetAllEvents
 
         let getStream evs = (evs |> get).GetStream
+
 
 module Domain =
 
@@ -1022,6 +1019,21 @@ module Domain =
 
                 ReadModel.inMemory updateState Map.empty
 
+            let queryRegistered registered query =
+                match query with
+                | Registered -> 
+                    async {
+                        let! state = registered ()
+                        
+                        return 
+                            state 
+                            |> Map.tryFind "patients"
+                            |> Option.defaultValue Set.empty
+                            |> Set.toList
+                            |> box
+                            |> Handled
+                    }
+                | _ -> async { return NotHandled }
 
         module Behaviour =
 
@@ -1107,7 +1119,6 @@ module Domain =
                     |> Map.iter (fun s p -> printfn "%A" p)
 
 
-
 module App =
 
     module Patient =
@@ -1115,20 +1126,7 @@ module App =
         open Infrastructure 
         open Domain
 
-        let store : EventStore<Patient.Event> = 
-            EventStorage.InMemoryStorage.initialize []
-            |> EventStore.initialize
-
-
-        let handler =
-            CommandHandler.initialize Patient.Behaviour.behaviour store
-
-        let listener = EventListener.initialize ()
-
-        store.OnEvents.Add listener.Notify
-
-        let readModel = Patient.ReadModels.registered ()
-        readModel.EventHandler |> listener.Subscribe
+        let registered = Patient.ReadModels.registered ()
 
         let config = 
             {
@@ -1139,9 +1137,11 @@ module App =
                 QueryHandler =
                     QueryHandler.initialize
                         [
+                            Patient.ReadModels.queryRegistered registered.State   
                         ]
                 EventHandlers =
                     [
+                        registered.EventHandler
                     ]
             }
 
@@ -1171,6 +1171,10 @@ App.Patient.app.GetStream "patients"
 App.Patient.app.GetAllEvents ()
 |> Async.RunSynchronously
 |> Helper.printEvents "Events"
+
+Patient.ReadModels.Registered
+|> App.Patient.app.HandleQuery 
+|> Helper.printQueryResults "Registered"
 
 Domain.Patient.Behaviour.Tests.run ()
 
