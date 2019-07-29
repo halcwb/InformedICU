@@ -92,8 +92,9 @@ module Infrastructure =
             agent.Start()
             agent
 
-    /// The aggregate id for a list of events
-    type EventSource = System.Guid
+    type EventId = System.Guid
+
+    type StreamId = string
 
     /// Produces a new list of events based on
     /// a list of previous events
@@ -104,27 +105,31 @@ module Infrastructure =
     /// aggregate id and the creation time
     type EventMetadata =
         {
-            Source : EventSource
+            EventId : EventId
+            StreamId : StreamId
             RecordedAtUtc : System.DateTime
         }
 
     /// Wrapper for an event with meta data
-    type EventEnvelope<'Event> =
+    type Event<'Event> =
         {
             Metadata : EventMetadata
             Event : 'Event
         }
 
-    /// Process a list of event envelopes in a 
+
+    /// Process a list of events in a 
     /// asynchronous way.
     type EventHandler<'Event> =
-        EventEnvelope<'Event> list -> Async<unit>
+        Event<'Event> list -> Async<unit>
+
 
     /// The event result is either a list of 
     /// event envelopes if successfull or an
     /// string with the error.
     type EventResult<'Event> =
-        Result<EventEnvelope<'Event> list, string>
+        Result<Event<'Event> list, string>
+
 
     /// The event store, stores the event envelopes
     /// in streams identified by the `EventSource`.
@@ -133,28 +138,31 @@ module Infrastructure =
     type EventStore<'Event> =
         {
             Get : unit -> Async<EventResult<'Event>>
-            GetStream : EventSource -> Async<EventResult<'Event>>
-            Append : EventEnvelope<'Event> list -> Async<Result<unit, string>>
+            GetStream : StreamId -> Async<EventResult<'Event>>
+            Append : Event<'Event> list -> Async<Result<unit, string>>
             OnError : IEvent<exn>
-            OnEvents : IEvent<EventEnvelope<'Event> list>
+            OnEvents : IEvent<Event<'Event> list>
         }
+
 
     /// An event listener can act upon each appended list
     /// of event envelopes to the event store.
     type EventListener<'Event> =
         {
             Subscribe : EventHandler<'Event> -> unit
-            Notify : EventEnvelope<'Event> list -> unit
+            Notify : Event<'Event> list -> unit
         }
+
 
     /// The event storage takes care of the persistence of
     /// of event envelopes.
     type EventStorage<'Event> =
         {
             Get : unit -> Async<EventResult<'Event>>
-            GetStream : EventSource -> Async<EventResult<'Event>>
-            Append : EventEnvelope<'Event> list -> Async<unit>
+            GetStream : StreamId -> Async<EventResult<'Event>>
+            Append : Event<'Event> list -> Async<unit>
         }
+
 
     /// A projection calculates the current state from
     /// the update with an event with the previous state
@@ -163,6 +171,7 @@ module Infrastructure =
             Init : 'State
             Update : 'State -> 'Event -> 'State
         }
+
 
     type QueryResult =
         | Handled of obj
@@ -182,7 +191,7 @@ module Infrastructure =
 
     type CommandHandler<'Command> =
       {
-        Handle : EventSource -> 'Command -> Async<Result<unit,string>>
+        Handle : StreamId -> 'Command -> Async<Result<unit,string>>
         OnError : IEvent<exn>
       }
 
@@ -252,73 +261,16 @@ module Infrastructure =
             // waitForAnyKey()
            
 
-    type EventSourcedConfig<'Comand,'Event,'Query> =
-        {
-            EventStoreInit : EventStorage<'Event> -> EventStore<'Event>
-            EventStorageInit : unit -> EventStorage<'Event>
-            CommandHandlerInit : EventStore<'Event> -> CommandHandler<'Comand>
-            QueryHandler : QueryHandler<'Query>
-            EventListenerInit : unit -> EventListener<'Event>
-            EventHandlers : EventHandler<'Event> list
-        }
+    module Event =
 
-
-    type EventSourced<'Comand,'Event,'Query> (configuration : EventSourcedConfig<'Comand,'Event,'Query>) =
-
-        let eventStorage = configuration.EventStorageInit()
-
-        let eventStore = configuration.EventStoreInit eventStorage
-
-        let commandHandler = configuration.CommandHandlerInit eventStore
-
-        let queryHandler = configuration.QueryHandler
-
-        let eventListener = configuration.EventListenerInit()
-
-        do
-            eventStore.OnError.Add(fun exn -> Helper.printError (sprintf "EventStore Error: %s" exn.Message) exn)
-            commandHandler.OnError.Add(fun exn -> Helper.printError (sprintf "CommandHandler Error: %s" exn.Message) exn)
-            eventStore.OnEvents.Add eventListener.Notify
-            configuration.EventHandlers |> List.iter eventListener.Subscribe
-
-        member __.HandleCommand eventSource command =
-            commandHandler.Handle eventSource command
-
-        member __.HandleQuery query =
-            queryHandler.Handle query
-
-        member __.GetAllEvents () =
-            eventStore.Get()
-
-        member __.GetStream eventSource =
-            eventStore.GetStream eventSource
-
-
-    module EventSourced =
-
-        let private apply f (x: EventSourced<_, _, _>) = x |> f
-
-        let private get x = apply id x
-
-        let fromConfig config = new EventSourced<_, _, _>(config)
-
-        let handleCommand evs = (evs |> get).HandleCommand
-
-        let handleQuery evs = (evs |> get).HandleQuery
-
-        let getAllEvents evs = (evs |> get).GetAllEvents
-
-        let getStream evs = (evs |> get).GetStream
-
-
-    module EventEnvelope =
-
-        let enveloped source events =
+        let enveloped streamId events =
             let now = System.DateTime.UtcNow
+            let eventId = System.Guid.NewGuid ()
             let envelope event =
                 {
                     Metadata = {
-                        Source = source
+                        EventId = eventId
+                        StreamId = streamId
                         RecordedAtUtc = now
                         }
                     Event = event
@@ -326,9 +278,10 @@ module Infrastructure =
 
             events |> List.map envelope
 
-        let asEvents eventEnvelopes =
-            eventEnvelopes |> List.map (fun envelope -> envelope.Event)
+        let asEvents events =
+            events |> List.map (fun e -> e.Event)
 
+        let withStreamId streamId (e: Event<_>) = e.Metadata.StreamId = streamId
 
     module Projection =
         
@@ -336,194 +289,196 @@ module Infrastructure =
             events |> List.fold projection.Update projection.Init
 
         let intoMap projection =
-            fun state eventEnvelope ->
+            fun state event ->
                 state
-                |> Map.tryFind eventEnvelope.Metadata.Source
+                |> Map.tryFind event.Metadata.StreamId
                 |> Option.defaultValue projection.Init
-                |> fun projectionState -> eventEnvelope.Event |> projection.Update projectionState
-                |> fun newState -> state |> Map.add eventEnvelope.Metadata.Source newState
+                |> fun projectionState -> event.Event |> projection.Update projectionState
+                |> fun newState -> state |> Map.add event.Metadata.StreamId newState
 
 
-    module FileStorage =
+    module EventStorage =
 
-        open System.IO
-        open Thoth.Json.Net
+        module FileStorage =
 
-        let private get store =
-            store
-            |> File.ReadLines
-            |> List.ofSeq
-            |> List.traverseResult Decode.Auto.fromString<EventEnvelope<'Event>>
+            open System.IO
+            open Thoth.Json.Net
 
-        let private getStream store source =
-            store
-            |> File.ReadLines
-            |> List.ofSeq
-            |> List.traverseResult Decode.Auto.fromString<EventEnvelope<'Event>>
-            |> Result.map (List.filter (fun ee -> ee.Metadata.Source = source))
+            let private get store =
+                store
+                |> File.ReadLines
+                |> List.ofSeq
+                |> List.traverseResult Decode.Auto.fromString<Event<'Event>>
 
-        let private append store events =
-            use streamWriter = new StreamWriter(store, true)
-            events
-            |> List.map (fun eventEnvelope -> Encode.Auto.toString(0,eventEnvelope))
-            |> List.iter streamWriter.WriteLine
+            let private getStream store streamId =
+                store
+                |> File.ReadLines
+                |> List.ofSeq
+                |> List.traverseResult Decode.Auto.fromString<Event<'Event>>
+                |> Result.map (List.filter (Event.withStreamId streamId))
 
-            do streamWriter.Flush()
+            let private append store events =
+                use streamWriter = new StreamWriter(store, true)
+                events
+                |> List.map (fun event -> Encode.Auto.toString(0,event))
+                |> List.iter streamWriter.WriteLine
 
-        let initialize store : EventStorage<_> =
-            {
-                Get = fun () -> async { return get store }
-                GetStream = fun eventSource -> async { return getStream store eventSource  }
-                Append = fun events -> async { return append store events }
-            }
+                do streamWriter.Flush()
+
+            let initialize store : EventStorage<_> =
+                {
+                    Get = fun () -> async { return get store }
+                    GetStream = fun streamId -> async { return getStream store streamId  }
+                    Append = fun events -> async { return append store events }
+                }
 
 
-    module InMemoryStorage =
+        module InMemoryStorage =
 
-        type Msg<'Event> =
-            private
-            | Get of AsyncReplyChannel<EventResult<'Event>>
-            | GetStream of EventSource * AsyncReplyChannel<EventResult<'Event>>
-            | Append of EventEnvelope<'Event> list * AsyncReplyChannel<unit>
+            type Msg<'Event> =
+                private
+                | Get of AsyncReplyChannel<EventResult<'Event>>
+                | GetStream of StreamId * AsyncReplyChannel<EventResult<'Event>>
+                | Append of Event<'Event> list * AsyncReplyChannel<unit>
 
-        let private streamFor source history =
-            history |> List.filter (fun ee -> ee.Metadata.Source = source)
+            let private streamFor streamId history =
+                history |> List.filter (Event.withStreamId streamId)
 
-        let initialize history : EventStorage<'Event> =
-//            let history : EventEnvelope<'Event> list = []
+            let initialize history : EventStorage<'Event> =
+    //            let history : Event<'Event> list = []
 
-            let proc (inbox : Agent<Msg<_>>) =
-                let rec loop history =
-                    async {
-                        let! msg = inbox.Receive()
+                let proc (inbox : Agent<Msg<_>>) =
+                    let rec loop history =
+                        async {
+                            let! msg = inbox.Receive()
 
-                        match msg with
-                        | Get reply ->
-                            history
-                            |> Ok
-                            |> reply.Reply
+                            match msg with
+                            | Get reply ->
+                                history
+                                |> Ok
+                                |> reply.Reply
 
-                            return! loop history
+                                return! loop history
     
-                        | GetStream (source,reply) ->
-                            history
-                            |> streamFor source
-                            |> Ok
-                            |> reply.Reply
+                            | GetStream (streamId, reply) ->
+                                history
+                                |> streamFor streamId
+                                |> Ok
+                                |> reply.Reply
 
-                            return! loop history
+                                return! loop history
 
-                        | Append (events,reply) ->
-                            reply.Reply ()
-                            return! loop (history @ events)
-                    }
+                            | Append (events, reply) ->
+                                reply.Reply ()
+                                return! loop (history @ events)
+                        }
 
-                loop history
+                    loop history
 
-            let agent = Agent<Msg<_>>.Start(proc)
+                let agent = Agent<Msg<_>>.Start(proc)
 
-            {
-                Get = fun () ->  agent.PostAndAsyncReply Get
-                GetStream = fun eventSource -> agent.PostAndAsyncReply (fun reply -> (eventSource,reply) |> GetStream)
-                Append = fun events -> agent.PostAndAsyncReply (fun reply -> (events,reply) |> Append)
-            }
+                {
+                    Get = fun () ->  agent.PostAndAsyncReply Get
+                    GetStream = fun stream -> agent.PostAndAsyncReply (fun reply -> (stream, reply) |> GetStream)
+                    Append = fun events -> agent.PostAndAsyncReply (fun reply -> (events, reply) |> Append)
+                }
 
-        module Tests =
+            module Tests =
     
-            type Event = | HelloWorld
+                type Event = | HelloWorld
 
-            let storage : EventStorage<Event> = initialize()
+                let storage : EventStorage<Event> = initialize []
 
-            let run () =
-                let source = System.Guid.NewGuid ()
-                HelloWorld 
-                |> List.replicate 10
-                |> EventEnvelope.enveloped source
-                |> storage.Append
-                |> ignore
+                let run () =
+                    let streamId = "helloWorld"
+                    HelloWorld 
+                    |> List.replicate 10
+                    |> Event.enveloped streamId
+                    |> storage.Append
+                    |> ignore
 
-                storage.GetStream source
-                |> Async.RunSynchronously
-                |> Helper.printEvents "Stored events in storage:"
-
-
-
-    //module PostgresStorage =
-
-        //open Npgsql.FSharp
-        //open Thoth.Json.Net
-        //open Helper
-        //open Option
-
-        //let select = "SELECT metadata, payload FROM event_store"
-        //let order = "ORDER BY recorded_at_utc ASC, event_index ASC"
-
-        //let private hydrateEventEnvelopes reader =
-        //    let row = Sql.readRow reader
-        //    option {
-        //        let! metadata = Sql.readString "metadata" row
-        //        let! payload = Sql.readString "payload" row
-
-        //        let eventEnvelope =
-        //            metadata
-        //            |> Decode.Auto.fromString<EventMetadata>
-        //            |> Result.bind (fun metadata ->
-        //                payload
-        //                |> Decode.Auto.fromString<'Event>
-        //                |> Result.map (fun event -> { Metadata = metadata ; Event = event}))
-
-        //        return eventEnvelope
-        //    }
-
-        //let private get (DB_Connection_String db_connection) =
-        //    async {
-        //        return
-        //            db_connection
-        //            |> Sql.connect
-        //            |> Sql.query (sprintf "%s %s" select order)
-        //            |> Sql.executeReader hydrateEventEnvelopes
-        //            |> List.traverseResult id
-        //    }
-
-        //let private getStream (DB_Connection_String db_connection) source =
-        //    async {
-        //        return
-        //            db_connection
-        //            |> Sql.connect
-        //            |> Sql.query (sprintf "%s WHERE source = @source %s" select order)
-        //            |> Sql.parameters [ "@source", SqlValue.Uuid source ]
-        //            |> Sql.executeReader hydrateEventEnvelopes
-        //            |> List.traverseResult id
-        //    }
-
-        //let private append (DB_Connection_String db_connection) eventEnvelopes =
-        //    let query = """
-        //      INSERT INTO event_store (source, recorded_at_utc, event_index, metadata, payload)
-        //      VALUES (@source, @recorded_at_utc, @event_index, @metadata, @payload)"""
-
-        //    let parameters =
-        //        eventEnvelopes
-        //        |> List.mapi (fun index eventEnvelope ->
-        //            [
-        //                "@source", SqlValue.Uuid eventEnvelope.Metadata.Source
-        //                "@recorded_at_utc", SqlValue.Date eventEnvelope.Metadata.RecordedAtUtc
-        //                "@event_index", SqlValue.Int index
-        //                "@metadata", SqlValue.Jsonb <| Encode.Auto.toString(0,eventEnvelope.Metadata)
-        //                "@payload", SqlValue.Jsonb <| Encode.Auto.toString(0,eventEnvelope.Event)
-        //            ])
-
-        //    db_connection
-        //    |> Sql.connect
-        //    |> Sql.executeTransactionAsync [ query, parameters ]
-        //    |> Async.Ignore
+                    storage.GetStream streamId
+                    |> Async.RunSynchronously
+                    |> Helper.printEvents "Stored events in storage:"
 
 
-        //let initialize db_connection : EventStorage<_> =
-            //{
-            //    Get = fun () -> get db_connection
-            //    GetStream = fun eventSource -> getStream db_connection eventSource
-            //    Append = fun events -> append db_connection events
-            //}
+
+        //module PostgresStorage =
+
+            //open Npgsql.FSharp
+            //open Thoth.Json.Net
+            //open Helper
+            //open Option
+
+            //let select = "SELECT metadata, payload FROM event_store"
+            //let order = "ORDER BY recorded_at_utc ASC, event_index ASC"
+
+            //let private hydrateEventEnvelopes reader =
+            //    let row = Sql.readRow reader
+            //    option {
+            //        let! metadata = Sql.readString "metadata" row
+            //        let! payload = Sql.readString "payload" row
+
+            //        let eventEnvelope =
+            //            metadata
+            //            |> Decode.Auto.fromString<EventMetadata>
+            //            |> Result.bind (fun metadata ->
+            //                payload
+            //                |> Decode.Auto.fromString<'Event>
+            //                |> Result.map (fun event -> { Metadata = metadata ; Event = event}))
+
+            //        return eventEnvelope
+            //    }
+
+            //let private get (DB_Connection_String db_connection) =
+            //    async {
+            //        return
+            //            db_connection
+            //            |> Sql.connect
+            //            |> Sql.query (sprintf "%s %s" select order)
+            //            |> Sql.executeReader hydrateEventEnvelopes
+            //            |> List.traverseResult id
+            //    }
+
+            //let private getStream (DB_Connection_String db_connection) streamId =
+            //    async {
+            //        return
+            //            db_connection
+            //            |> Sql.connect
+            //            |> Sql.query (sprintf "%s WHERE streamId = @streamId %s" select order)
+            //            |> Sql.parameters [ "@streamId", SqlValue.Uuid streamId ]
+            //            |> Sql.executeReader hydrateEventEnvelopes
+            //            |> List.traverseResult id
+            //    }
+
+            //let private append (DB_Connection_String db_connection) eventEnvelopes =
+            //    let query = """
+            //      INSERT INTO event_store (streamId, recorded_at_utc, event_index, metadata, payload)
+            //      VALUES (@streamId, @recorded_at_utc, @event_index, @metadata, @payload)"""
+
+            //    let parameters =
+            //        eventEnvelopes
+            //        |> List.mapi (fun index eventEnvelope ->
+            //            [
+            //                "@streamId", SqlValue.Uuid eventEnvelope.Metadata.Source
+            //                "@recorded_at_utc", SqlValue.Date eventEnvelope.Metadata.RecordedAtUtc
+            //                "@event_index", SqlValue.Int index
+            //                "@metadata", SqlValue.Jsonb <| Encode.Auto.toString(0,eventEnvelope.Metadata)
+            //                "@payload", SqlValue.Jsonb <| Encode.Auto.toString(0,eventEnvelope.Event)
+            //            ])
+
+            //    db_connection
+            //    |> Sql.connect
+            //    |> Sql.executeTransactionAsync [ query, parameters ]
+            //    |> Async.Ignore
+
+
+            //let initialize db_connection : EventStorage<_> =
+                //{
+                //    Get = fun () -> get db_connection
+                //    GetStream = fun eventSource -> getStream db_connection eventSource
+                //    Append = fun events -> append db_connection events
+                //}
 
 
 
@@ -531,11 +486,11 @@ module Infrastructure =
 
         type Msg<'Event> =
             | Get of AsyncReplyChannel<EventResult<'Event>>
-            | GetStream of EventSource * AsyncReplyChannel<EventResult<'Event>>
-            | Append of EventEnvelope<'Event> list * AsyncReplyChannel<Result<unit,string>>
+            | GetStream of StreamId * AsyncReplyChannel<EventResult<'Event>>
+            | Append of Event<'Event> list * AsyncReplyChannel<Result<unit,string>>
 
         let initialize (storage : EventStorage<_>) : EventStore<_> =
-            let eventsAppended = Event<EventEnvelope<_> list>()
+            let eventsAppended = Event<Event<_> list>()
 
             let proc (inbox : Agent<Msg<_>>) =
                 let rec loop () =
@@ -552,9 +507,9 @@ module Infrastructure =
                             return! loop ()
 
 
-                        | GetStream (source,reply) ->
+                        | GetStream (stream, reply) ->
                             try
-                                let! stream = source |> storage.GetStream
+                                let! stream = stream |> storage.GetStream
                                 do stream |> reply.Reply
                             with exn ->
                                 do inbox.Trigger(exn)
@@ -562,7 +517,7 @@ module Infrastructure =
 
                             return! loop ()
 
-                        | Append (events,reply) ->
+                        | Append (events, reply) ->
                             try
                                 do! events |> storage.Append
                                 do eventsAppended.Trigger events
@@ -580,8 +535,8 @@ module Infrastructure =
 
             {
                 Get = fun () -> agent.PostAndAsyncReply Get
-                GetStream = fun eventSource -> agent.PostAndAsyncReply (fun reply -> GetStream (eventSource,reply))
-                Append = fun events -> agent.PostAndAsyncReply (fun reply -> Append (events,reply))
+                GetStream = fun stream -> agent.PostAndAsyncReply (fun reply -> GetStream (stream, reply))
+                Append = fun events -> agent.PostAndAsyncReply (fun reply -> Append (events, reply))
                 OnError = agent.OnError
                 OnEvents = eventsAppended.Publish
             }
@@ -592,7 +547,7 @@ module Infrastructure =
 
             // create an event store for the hello world event
             let store : EventStore<Event> = 
-                InMemoryStorage.initialize ()
+                EventStorage.InMemoryStorage.initialize []
                 |> initialize
 
             // will print out received event envelopes
@@ -600,22 +555,23 @@ module Infrastructure =
             
             // run the tests
             let run () =
-                let source = System.Guid.NewGuid ()
+                let streamId = "helloworld1"
+                
                 HelloWorld
                 |> List.replicate 5
-                |> EventEnvelope.enveloped source
+                |> Event.enveloped streamId
                 |> store.Append
                 |> ignore
 
-                let source = System.Guid.NewGuid ()
+                let streamId = "helloworld2"
                 HelloWorld
                 |> List.replicate 5
-                |> EventEnvelope.enveloped source
+                |> Event.enveloped streamId
                 |> store.Append
                 |> ignore
                 
                 // get the appended events
-                store.GetStream source
+                store.GetStream streamId
                 |> Async.RunSynchronously
                 |> Helper.printEvents "Get Stream"
 
@@ -629,7 +585,7 @@ module Infrastructure =
     module EventListener =
 
         type Msg<'Event> =
-            | Notify of EventEnvelope<'Event> list
+            | Notify of Event<'Event> list
             | Subscribe of EventHandler<'Event>
 
 
@@ -673,7 +629,7 @@ module Infrastructure =
                 async { return printfn "Handled: %A" ees }
 
             let events =
-                [ HelloWorld ] |> EventEnvelope.enveloped (System.Guid.NewGuid ())
+                [ HelloWorld ] |> Event.enveloped "helloworld"
 
             let run () =
                 // no handlers, nothing happens
@@ -730,24 +686,28 @@ module Infrastructure =
 
     module CommandHandler =
                         
-        type Msg<'Command> =
-            | Handle of EventSource * 'Command * AsyncReplyChannel<Result<unit,string>>
+        type Msg<'Event, 'Command> =
+            | Handle of StreamId * 'Command * AsyncReplyChannel<Result<unit,string>>
 
-        let initialize (behaviour : Behaviour<_,_>) (eventStore : EventStore<_>) : CommandHandler<_> =
-            let proc (inbox : Agent<Msg<_>>) =
+        let initialize (behaviour : Behaviour<_,_>) 
+                       (eventStore : EventStore<_>) : CommandHandler<_> =
+            let proc (inbox : Agent<Msg<_, _>>) =
                 let rec loop () =
                     async {
                         let! msg = inbox.Receive()
 
                         match msg with
-                        | Handle (eventSource,command,reply) ->
-                            let! stream = eventSource |> eventStore.GetStream
+                        | Handle (streamId, command, reply) ->
+                            let! stream = streamId |> eventStore.GetStream
 
                             let newEvents =
                                 stream 
-                                |> Result.map (EventEnvelope.asEvents 
-                                               >> behaviour command 
-                                               >> EventEnvelope.enveloped eventSource)
+                                |> Result.map (fun evs ->
+                                    evs
+                                    |> Event.asEvents 
+                                    |> behaviour command 
+                                    |> Event.enveloped streamId
+                                )
 
                             let! result =
                                 newEvents
@@ -762,10 +722,10 @@ module Infrastructure =
 
                 loop ()
 
-            let agent = Agent<Msg<_>>.Start(proc)
+            let agent = Agent<Msg<_, _>>.Start(proc)
 
             {
-                Handle = fun source command -> agent.PostAndAsyncReply (fun reply -> Handle (source,command,reply))
+                Handle = fun streamId command -> agent.PostAndAsyncReply (fun reply -> Handle (streamId, command, reply))
                 OnError = agent.OnError
             }
 
@@ -777,7 +737,7 @@ module Infrastructure =
 
             // create an event store for the hello world event
             let store : EventStore<Event> = 
-                InMemoryStorage.initialize ()
+                EventStorage.InMemoryStorage.initialize []
                 |> EventStore.initialize
 
             let behaviour : Behaviour<Command, Event> =
@@ -793,11 +753,11 @@ module Infrastructure =
                 initialize behaviour store
 
             let run () =
-                let source = System.Guid.NewGuid()
-
+                let streamId = "helloworld"
+                
                 "Hello World"
                 |> HelloWordCommand
-                |> handler.Handle source
+                |> handler.Handle streamId
                 |> Async.RunSynchronously
                 |> printfn "%A"
 
@@ -807,7 +767,7 @@ module Infrastructure =
 
                 "Hello World"
                 |> HelloWordCommand
-                |> handler.Handle source
+                |> handler.Handle streamId
                 |> Async.RunSynchronously
                 |> printfn "%A"
 
@@ -819,10 +779,10 @@ module Infrastructure =
     module ReadModel =
 
         type Msg<'Event,'Result> =
-            | Notify of EventEnvelope<'Event> list * AsyncReplyChannel<unit>
+            | Notify of Event<'Event> list * AsyncReplyChannel<unit>
             | State of AsyncReplyChannel<'Result>
 
-        let inMemory (updateState : 'State -> EventEnvelope<'Event> list -> 'State) 
+        let inMemory (updateState : 'State -> Event<'Event> list -> 'State) 
                      (initState : 'State) : ReadModel<'Event, 'State> =
             let agent =
                 let eventSubscriber (inbox : Agent<Msg<_,_>>) =
@@ -846,7 +806,7 @@ module Infrastructure =
                 Agent<Msg<_,_>>.Start(eventSubscriber)
 
             {
-                EventHandler = fun eventEnvelopes -> agent.PostAndAsyncReply(fun reply -> Notify (eventEnvelopes,reply))
+                EventHandler = fun eventEnvelopes -> agent.PostAndAsyncReply(fun reply -> Notify (eventEnvelopes, reply))
                 State = fun () -> agent.PostAndAsyncReply State
             }
 
@@ -855,6 +815,63 @@ module Infrastructure =
         
             let run () = ()
 
+
+
+    type EventSourcedConfig<'Comand,'Event,'Query> =
+        {
+            EventStorageInit : unit -> EventStorage<'Event>
+            CommandHandlerInit : EventStore<'Event> -> CommandHandler<'Comand>
+            QueryHandler : QueryHandler<'Query>
+            EventHandlers : EventHandler<'Event> list
+        }
+
+
+    type EventSourced<'Comand,'Event,'Query> (configuration : EventSourcedConfig<'Comand,'Event,'Query>) =
+
+        let eventStorage = configuration.EventStorageInit()
+
+        let eventStore = EventStore.initialize eventStorage
+
+        let commandHandler = configuration.CommandHandlerInit eventStore
+
+        let queryHandler = configuration.QueryHandler
+
+        let eventListener = EventListener.initialize ()
+
+        do
+            eventStore.OnError.Add(fun exn -> Helper.printError (sprintf "EventStore Error: %s" exn.Message) exn)
+            commandHandler.OnError.Add(fun exn -> Helper.printError (sprintf "CommandHandler Error: %s" exn.Message) exn)
+            eventStore.OnEvents.Add eventListener.Notify
+            configuration.EventHandlers |> List.iter eventListener.Subscribe
+
+        member __.HandleCommand eventSource command =
+            commandHandler.Handle eventSource command
+
+        member __.HandleQuery query =
+            queryHandler.Handle query
+
+        member __.GetAllEvents () =
+            eventStore.Get()
+
+        member __.GetStream stream =
+            eventStore.GetStream stream
+
+
+    module EventSourced =
+
+        let private apply f (x: EventSourced<_, _, _>) = x |> f
+
+        let private get x = apply id x
+
+        let fromConfig config = new EventSourced<_, _, _>(config)
+
+        let handleCommand evs = (evs |> get).HandleCommand
+
+        let handleQuery evs = (evs |> get).HandleQuery
+
+        let getAllEvents evs = (evs |> get).GetAllEvents
+
+        let getStream evs = (evs |> get).GetStream
 
 module Domain =
 
@@ -909,11 +926,6 @@ module Domain =
                     |> Some
                 | None -> None
 
-        type Command =
-            | Register of Dto
-            | Admit of HospitalNumber
-            | Discharge of HospitalNumber
-
         type Event =
             | Registered of Patient
             | InvalidPatient of Dto
@@ -960,11 +972,12 @@ module Domain =
                 open Infrastructure
 
                 let store : EventStore<Event> =
-                    InMemoryStorage.initialize ()
+                    EventStorage.InMemoryStorage.initialize []
                     |> EventStore.initialize
 
                 let run () =
-                    let source = System.Guid.NewGuid ()
+                    let streamId = "patients"
+
                     // add some registered patient events to the store
                     [
                         create "1" "LastName" "FirstName" DateTime.Now
@@ -973,21 +986,21 @@ module Domain =
                     ]
                     |> List.map Registered
                     |> List.append [ "1" |> Admitted ]
-                    |> EventEnvelope.enveloped source
+                    |> Event.enveloped streamId
                     |> store.Append
                     |> ignore
 
                     // get the registered patients
-                    store.GetStream source
+                    store.GetStream streamId
                     |> Async.RunSynchronously
-                    |> Result.map (EventEnvelope.asEvents >> (Projection.project registerdPatients))
+                    |> Result.map (Event.asEvents >> (Projection.project registerdPatients))
                     |> Result.map (fun set -> set |> Set.iter (printfn "%A"))
                     |> ignore
 
                     // get admitted patients
-                    store.GetStream source
+                    store.GetStream streamId
                     |> Async.RunSynchronously
-                    |> Result.map (EventEnvelope.asEvents >> admittedPatients)
+                    |> Result.map (Event.asEvents >> admittedPatients)
                     |> Result.map (fun pats -> pats |> List.iter (printfn "%A"))
                     |> ignore
 
@@ -995,6 +1008,12 @@ module Domain =
         module ReadModels =
 
             open Infrastructure
+
+            type Query = 
+                | Registered
+                | Admitted
+                | Discharged
+
 
             let registered () : ReadModel<_, _> =
                 let updateState state evs =
@@ -1007,6 +1026,11 @@ module Domain =
         module Behaviour =
 
             open Infrastructure
+
+            type Command =
+                | Register of Dto
+                | Admit of HospitalNumber
+                | Discharge of HospitalNumber
 
             let registerPatient pat events = 
 
@@ -1037,7 +1061,7 @@ module Domain =
                 
                 // create an event store for the hello world event
                 let store : EventStore<Event> = 
-                    InMemoryStorage.initialize []
+                    EventStorage.InMemoryStorage.initialize []
                     |> EventStore.initialize
 
                 let behaviour : Behaviour<Command, Event> =
@@ -1058,10 +1082,10 @@ module Domain =
                 readModel.EventHandler |> listener.Subscribe
 
                 let run () =
-                    let source = System.Guid.NewGuid()
+                    let streamId = "patients"
 
                     TestRegisterPatient
-                    |> handler.Handle source
+                    |> handler.Handle streamId
                     |> Async.RunSynchronously
                     |> printfn "%A"
 
@@ -1070,7 +1094,7 @@ module Domain =
                     |> Helper.printEvents "Events"
 
                     TestRegisterPatient
-                    |> handler.Handle source
+                    |> handler.Handle streamId
                     |> Async.RunSynchronously
                     |> printfn "%A"
 
@@ -1092,7 +1116,7 @@ module App =
         open Domain
 
         let store : EventStore<Patient.Event> = 
-            InMemoryStorage.initialize []
+            EventStorage.InMemoryStorage.initialize []
             |> EventStore.initialize
 
 
@@ -1106,7 +1130,47 @@ module App =
         let readModel = Patient.ReadModels.registered ()
         readModel.EventHandler |> listener.Subscribe
 
+        let config = 
+            {
+                EventStorageInit =
+                    fun () -> EventStorage.InMemoryStorage.initialize []
+                CommandHandlerInit =
+                    CommandHandler.initialize Patient.Behaviour.behaviour
+                QueryHandler =
+                    QueryHandler.initialize
+                        [
+                        ]
+                EventHandlers =
+                    [
+                    ]
+            }
 
+        let app = EventSourced<Patient.Behaviour.Command, Patient.Event, Patient.ReadModels.Query>(config)
+
+
+open System
+open Infrastructure
+open Domain
+
+let dto = Patient.Dto.dto ()
+dto.HospitalNumber <- "1"
+dto.FirstName <- "Test"
+dto.LastName <- "Test"
+dto.BirthDate <- DateTime.Now.AddDays(-200.) |> Some
+
+
+dto
+|> Patient.Behaviour.Register
+|> App.Patient.app.HandleCommand "patients"
+
+App.Patient.app.GetStream "patients"
+|> Async.RunSynchronously
+|> Helper.printEvents "Events"
+
+
+App.Patient.app.GetAllEvents ()
+|> Async.RunSynchronously
+|> Helper.printEvents "Events"
 
 Domain.Patient.Behaviour.Tests.run ()
 
