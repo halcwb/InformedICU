@@ -4,54 +4,72 @@
 #load ".paket/load/netcoreapp2.2/main.group.fsx"
 
 
-module List =
+module Extenstions = 
 
-    /// Map a Result producing function over a list to get a new Result
-    /// ('a -> Result<'b>) -> 'a list -> Result<'b list>
-    let traverseResult f list =
+    module List =
 
-        // define the monadic functions
-        let (>>=) x f = Result.bind f x
-        let ok = Result.Ok
+        /// Map a Result producing function over a list to get a new Result
+        /// ('a -> Result<'b>) -> 'a list -> Result<'b list>
+        let traverseResult f list =
 
-        // right fold over the list
-        let initState = ok []
-        let folder head tail =
-            f head >>= (fun h ->
-            tail >>= (fun t ->
-            ok (h :: t) ))
+            // define the monadic functions
+            let (>>=) x f = Result.bind f x
+            let ok = Result.Ok
 
-        List.foldBack folder list initState
+            // right fold over the list
+            let initState = ok []
+            let folder head tail =
+                f head >>= (fun h ->
+                tail >>= (fun t ->
+                ok (h :: t) ))
 
-    module Tests =
-    
-        let f1 x : Result<_, string> = Result.Ok x
-        let f2 _ : Result<string, _> = Result.Error "always fails"
+            List.foldBack folder list initState
 
-        traverseResult f1 [ "a" ] // returns OK [ "a" ]
-        traverseResult f2 [ "a" ] // returns Error "always fails"
+        module Tests =
+        
+            let f1 x : Result<_, string> = Result.Ok x
+            let f2 _ : Result<string, _> = Result.Error "always fails"
+
+            traverseResult f1 [ "a" ] // returns OK [ "a" ]
+            traverseResult f2 [ "a" ] // returns Error "always fails"
 
 
-module Option =
+    module Option =
 
-    type OptionBuilder() =
-        member x.Bind(v,f) = Option.bind f v
-        member x.Return v = Some v
-        member x.ReturnFrom o = o
-        member x.Zero () = None
+        type OptionBuilder() =
+            member x.Bind(v,f) = Option.bind f v
+            member x.Return v = Some v
+            member x.ReturnFrom o = o
+            member x.Zero () = None
 
-    let option = OptionBuilder()
+        let option = OptionBuilder()
 
-    module Tests =
+        module Tests =
 
-        let twice x =
-            option {
-                let! v = x
-                return v + v
-            }
+            let twice x =
+                option {
+                    let! v = x
+                    return v + v
+                }
 
-        Some ("x") |> twice // returns Some "xx"
-        None |> twice       // returns None
+            Some ("x") |> twice // returns Some "xx"
+            None |> twice       // returns None
+
+
+    module Result = 
+
+        let isOk (result : Result<_, _>) =
+            match result with
+            | Ok _ -> true
+            | Error _ -> false
+
+        let get (result : Result<_, _>) =
+            match result with
+            | Ok r -> r
+            | Error e -> 
+                e.ToString () 
+                |> exn 
+                |> raise
 
 
 module Infrastructure =
@@ -887,13 +905,14 @@ module Domain =
     module Patient =
 
 
-        let create hn ln fn bd : Patient =
+        let create hn ln fn bd : Result<Patient, string> =
             {
                 HospitalNumber = hn
                 LastName = ln
                 FirstName = fn
                 BirthDate = bd
             }
+            |> Result.Ok
 
         type Dto () = 
             member val HospitalNumber  = "" with get, set
@@ -920,12 +939,11 @@ module Domain =
                            dto.LastName
                            dto.FirstName
                            bd
-                    |> Some
-                | None -> None
+                | None -> "No birthdate" |> Result.Error
 
         type Event =
             | Registered of Patient
-            | InvalidPatient of Dto
+            | InvalidPatient of string
             | AllReadyRegistered of HospitalNumber
             | Admitted of HospitalNumber
             | Discharged of HospitalNumber
@@ -981,9 +999,11 @@ module Domain =
                         create "2" "LastName" "FirstName" DateTime.Now
                         create "3" "LastName" "FirstName" DateTime.Now   
                     ]
-                    |> List.map Registered
-                    |> List.append [ "1" |> Admitted ]
-                    |> Event.enveloped streamId
+                    |> List.map (Result.map Registered)
+                    |> List.append [ "1" |> Admitted |> Result.Ok ]
+                    |> List.filter Result.isOk
+                    |> List.map Result.get
+                    |> Event.enveloped "patients"
                     |> store.Append
                     |> ignore
 
@@ -1059,10 +1079,10 @@ module Domain =
                     match cmd with
                     | Register dto -> 
                         match dto |> Dto.fromDto with
-                        | Some pat -> 
+                        | Ok pat -> 
                             evs
                             |> registerPatient pat
-                        | None -> [ dto |> InvalidPatient ]
+                        | Error e -> [ e |> InvalidPatient ]
                     | _ -> "Not implemented yet" |> exn |> raise
 
             module Tests =
@@ -1081,7 +1101,7 @@ module Domain =
                         match cmd with
                         | TestRegisterPatient -> 
                             ees
-                            |> registerPatient (create "1" "Test" "Test" (new DateTime(1965, 12, 7)))
+                            |> registerPatient (create "1" "Test" "Test" (new DateTime(1965, 12, 7)) |> Result.get)
 
                 let handler =
                     CommandHandler.initialize behaviour store
@@ -1162,19 +1182,21 @@ dto.BirthDate <- DateTime.Now.AddDays(-200.) |> Some
 dto
 |> Patient.Behaviour.Register
 |> App.Patient.app.HandleCommand "patients"
+|> Async.RunSynchronously
+|> Helper.printCommandResults "Register Patient"
 
 App.Patient.app.GetStream "patients"
 |> Async.RunSynchronously
-|> Helper.printEvents "Events"
+|> Helper.printEvents "Patients Steam"
 
 
 App.Patient.app.GetAllEvents ()
 |> Async.RunSynchronously
-|> Helper.printEvents "Events"
+|> Helper.printEvents "All Events"
 
 Patient.ReadModels.Registered
 |> App.Patient.app.HandleQuery 
-|> Helper.printQueryResults "Registered"
+|> Helper.printQueryResults "Registered Patients"
 
 Domain.Patient.Behaviour.Tests.run ()
 
