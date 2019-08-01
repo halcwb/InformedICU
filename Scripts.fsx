@@ -1,7 +1,9 @@
 ﻿/// Scripting the entire ICU app
 ///
 #I __SOURCE_DIRECTORY__
+#load ".paket/load/netcoreapp2.2/Npgsql.fsx"
 #load ".paket/load/netcoreapp2.2/main.group.fsx"
+
 
 
 module Extensions = 
@@ -167,7 +169,6 @@ module Extensions =
                     |> printfn "%A"
 
             
-
 module Infrastructure =
 
     /// A wrapper for MailboxProcessor that catches all unhandled exceptions
@@ -503,9 +504,13 @@ module Infrastructure =
                 {
                     Get = fun () ->  agent.PostAndAsyncReply Get
                     GetStream = fun stream -> 
-                        agent.PostAndAsyncReply (fun reply -> (stream, reply) |> GetStream)
+                        agent.PostAndAsyncReply (fun reply -> 
+                            (stream, reply) |> GetStream
+                        )
                     Append = fun events -> 
-                        agent.PostAndAsyncReply (fun reply -> (events, reply) |> Append)
+                        agent.PostAndAsyncReply (fun reply -> 
+                            (events, reply) |> Append
+                        )
                 }
 
             module Tests =
@@ -528,82 +533,86 @@ module Infrastructure =
 
 
 
-        //module PostgresStorage =
+        module PostgresStorage =
 
-            //open Npgsql.FSharp
-            //open Thoth.Json.Net
-            //open Helper
-            //open Option
+            open Npgsql.FSharp
+            open Thoth.Json.Net
+            open Helper
+            open Extensions
+            open Extensions.Option
 
-            //let select = "SELECT metadata, payload FROM event_store"
-            //let order = "ORDER BY recorded_at_utc ASC, event_index ASC"
+            let select = "SELECT metadata, payload FROM event_store"
+            let order = "ORDER BY recorded_at_utc ASC, event_index ASC"
 
-            //let private hydrateEventEnvelopes reader =
-            //    let row = Sql.readRow reader
-            //    option {
-            //        let! metadata = Sql.readString "metadata" row
-            //        let! payload = Sql.readString "payload" row
+            let private hydrateEvents reader =
+                let row = Sql.readRow reader
+                option {
+                    let! metadata = Sql.readString "metadata" row
+                    let! payload = Sql.readString "payload" row
 
-            //        let eventEnvelope =
-            //            metadata
-            //            |> Decode.Auto.fromString<EventMetadata>
-            //            |> Result.bind (fun metadata ->
-            //                payload
-            //                |> Decode.Auto.fromString<'Event>
-            //                |> Result.map (fun event -> { Metadata = metadata ; Event = event}))
+                    let event =
+                        metadata
+                        |> Decode.Auto.fromString<EventMetadata>
+                        |> Result.bind (fun metadata ->
+                            payload
+                            |> Decode.Auto.fromString<'Event>
+                            |> Result.map (fun event -> 
+                                { Metadata = metadata ; Event = event}
+                            )
+                        )
 
-            //        return eventEnvelope
-            //    }
+                    return event
+                }
 
-            //let private get (DB_Connection_String db_connection) =
-            //    async {
-            //        return
-            //            db_connection
-            //            |> Sql.connect
-            //            |> Sql.query (sprintf "%s %s" select order)
-            //            |> Sql.executeReader hydrateEventEnvelopes
-            //            |> List.traverseResult id
-            //    }
+            let private get (DB_Connection_String db_connection) =
+                async {
+                    return
+                        db_connection
+                        |> Sql.connect
+                        |> Sql.query (sprintf "%s %s" select order)
+                        |> Sql.executeReader hydrateEvents
+                        |> List.traverseResult id
+                }
 
-            //let private getStream (DB_Connection_String db_connection) streamId =
-            //    async {
-            //        return
-            //            db_connection
-            //            |> Sql.connect
-            //            |> Sql.query (sprintf "%s WHERE streamId = @streamId %s" select order)
-            //            |> Sql.parameters [ "@streamId", SqlValue.Uuid streamId ]
-            //            |> Sql.executeReader hydrateEventEnvelopes
-            //            |> List.traverseResult id
-            //    }
+            let private getStream (DB_Connection_String db_connection) streamId =
+                async {
+                    return
+                        db_connection
+                        |> Sql.connect
+                        |> Sql.query (sprintf "%s WHERE streamId = @streamId %s" select order)
+                        |> Sql.parameters [ "@streamId", SqlValue.String streamId ]
+                        |> Sql.executeReader hydrateEvents
+                        |> List.traverseResult id
+                }
 
-            //let private append (DB_Connection_String db_connection) eventEnvelopes =
-            //    let query = """
-            //      INSERT INTO event_store (streamId, recorded_at_utc, event_index, metadata, payload)
-            //      VALUES (@streamId, @recorded_at_utc, @event_index, @metadata, @payload)"""
+            let private append (DB_Connection_String db_connection) eventEnvelopes =
+                let query = """
+                  INSERT INTO event_store (streamId, recorded_at_utc, event_index, metadata, payload)
+                  VALUES (@streamId, @recorded_at_utc, @event_index, @metadata, @payload)"""
 
-            //    let parameters =
-            //        eventEnvelopes
-            //        |> List.mapi (fun index eventEnvelope ->
-            //            [
-            //                "@streamId", SqlValue.Uuid eventEnvelope.Metadata.Source
-            //                "@recorded_at_utc", SqlValue.Date eventEnvelope.Metadata.RecordedAtUtc
-            //                "@event_index", SqlValue.Int index
-            //                "@metadata", SqlValue.Jsonb <| Encode.Auto.toString(0,eventEnvelope.Metadata)
-            //                "@payload", SqlValue.Jsonb <| Encode.Auto.toString(0,eventEnvelope.Event)
-            //            ])
+                let parameters =
+                    eventEnvelopes
+                    |> List.mapi (fun index eventEnvelope ->
+                        [
+                            "@streamId", SqlValue.String eventEnvelope.Metadata.StreamId
+                            "@recorded_at_utc", SqlValue.Date eventEnvelope.Metadata.RecordedAtUtc
+                            "@event_index", SqlValue.Int index
+                            "@metadata", SqlValue.Jsonb <| Encode.Auto.toString(0,eventEnvelope.Metadata)
+                            "@payload", SqlValue.Jsonb <| Encode.Auto.toString(0,eventEnvelope.Event)
+                        ])
 
-            //    db_connection
-            //    |> Sql.connect
-            //    |> Sql.executeTransactionAsync [ query, parameters ]
-            //    |> Async.Ignore
+                db_connection
+                |> Sql.connect
+                |> Sql.executeTransactionAsync [ query, parameters ]
+                |> Async.Ignore
 
 
-            //let initialize db_connection : EventStorage<_> =
-                //{
-                //    Get = fun () -> get db_connection
-                //    GetStream = fun eventSource -> getStream db_connection eventSource
-                //    Append = fun events -> append db_connection events
-                //}
+            let initialize db_connection : EventStorage<_> =
+                {
+                    Get = fun () -> get db_connection
+                    GetStream = fun streamId -> getStream db_connection streamId
+                    Append = fun events -> append db_connection events
+                }
 
 
 
@@ -1010,7 +1019,7 @@ module Domain =
 
     open System
 
-    type HospitalNumber = string
+    type HospitalNumber = HospitalNumber of string
 
     type Name = Name of string
 
@@ -1024,6 +1033,21 @@ module Domain =
             BirthDate : BirthDate
         }
 
+    module HospitalNumber =
+
+        let create s = 
+            if s = "" then 
+                "Hospital number cannot be an empty string"
+                |> List.singleton
+                |> Result.Error
+            else 
+                s 
+                |> HospitalNumber
+                |> Result.Ok
+
+
+        let toString (HospitalNumber s) = s
+
 
     module Name =
 
@@ -1033,9 +1057,10 @@ module Domain =
             if s = "" then msg
                            |> List.singleton
                            |> Result.Error
-            else s 
-                    |> Name
-                    |> Result.Ok
+            else 
+                s 
+                |> Name
+                |> Result.Ok
 
         let toString (Name s) = s
         
@@ -1080,8 +1105,9 @@ module Domain =
                     BirthDate = bd
                 }
 
-            (f hn)
-            <!> Name.create "Last name cannot be empty" ln
+            f
+            <!> HospitalNumber.create hn
+            <*> Name.create "Last name cannot be empty" ln
             <*> Name.create "First name cannot be empty" fn
             <*> BirthDate.create bd
 
@@ -1097,7 +1123,7 @@ module Domain =
 
             let toDto (pat : Patient) =
                 let dto = dto ()
-                dto.HospitalNumber <- pat.HospitalNumber
+                dto.HospitalNumber <- pat.HospitalNumber |> HospitalNumber.toString
                 dto.FirstName <- pat.FirstName |> Name.toString
                 dto.LastName <- pat.LastName |> Name.toString
                 dto.BirthDate <- pat.BirthDate |> BirthDate.toDate |> Some
@@ -1108,6 +1134,20 @@ module Domain =
                         dto.LastName
                         dto.FirstName
                         dto.BirthDate
+
+            let toString (dto: Dto) =
+                let ds = 
+                    dto.BirthDate 
+                    |> Option.bind (fun bd ->
+                        bd.ToString("dd-mm-yy")
+                        |> Some
+                    )
+                    |> Option.defaultValue ""
+                sprintf "%s: %s, %s %s"
+                        dto.HospitalNumber
+                        dto.LastName
+                        dto.FirstName
+                        ds
 
         type Event =
             | Registered of Patient
@@ -1169,7 +1209,11 @@ module Domain =
                         create "3" "LastName" "FirstName" (DateTime.Now |> Some)
                     ]
                     |> List.map (Result.map Registered)
-                    |> List.append [ "1" |> Admitted |> Result.Ok ]
+                    |> List.append [ "1" 
+                                     |> HospitalNumber.create 
+                                     |> Result.get
+                                     |> Admitted 
+                                     |> Result.Ok ]
                     |> List.filter Result.isOk
                     |> List.map Result.get
                     |> Event.enveloped "patients"
@@ -1274,7 +1318,6 @@ module Domain =
                     |> Helper.printEvents "Events"
 
 
-
 module App =
 
     module Patient =
@@ -1355,7 +1398,6 @@ module App =
 
 
 
-
 open System
 open Infrastructure
 open Domain
@@ -1366,7 +1408,13 @@ dto.FirstName <- "Test2"
 dto.LastName <- "Test2"
 dto.BirthDate <- DateTime.Now.AddDays(-2000.) |> Some
 
-for i in [1..20] do
+for i in [1..5] do
+    let n = 
+        dto.HospitalNumber
+        |> (fun n -> if n = "" then "0" else n)
+        |> System.Int32.Parse 
+        |> ((+) 1)
+
     dto.HospitalNumber <- i |> string
     dto
     |> Patient.Behaviour.Register
@@ -1384,9 +1432,14 @@ App.Patient.getAllEvents ()
 
 App.Patient.ReadModels.Registered
 |> App.Patient.handleQuery 
-|> Helper.printQueryResults "Registered Patients"
-
-
+|> Async.RunSynchronously
+|> function
+| Handled obj ->
+    obj 
+    :?> Patient list
+    |> List.map (Patient.Dto.toDto >> Patient.Dto.toString)
+    |> List.iter (printfn "%s")
+| _ -> ()
 
 Extensions.Result.Tests.Test.run ()
 Domain.Patient.Behaviour.Tests.run ()
