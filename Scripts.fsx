@@ -5,6 +5,21 @@
 #load ".paket/load/netcoreapp2.2/main.group.fsx"
 
 
+module Memoization =
+
+    
+    /// Memoize a function `f` according
+    /// to its parameter
+    let memoize f =
+        let cache = ref Map.empty
+        fun x ->
+            match (!cache).TryFind(x) with
+            | Some r -> r
+            | None ->
+                let r = f x
+                cache := (!cache).Add(x, r)
+                r
+
 
 module Extensions = 
 
@@ -26,6 +41,14 @@ module Extensions =
                 ok (h :: t) ))
 
             List.foldBack folder list initState
+
+
+        let remove eqs xs = 
+            xs
+            |> List.fold (fun acc x ->
+                if x |> eqs then acc
+                else acc @ [x]
+            ) []
 
         module Tests =
         
@@ -99,6 +122,14 @@ module Extensions =
         let liftR f x =
             let f' =  f |> Result.Ok
             applyR (List.append) f' x
+
+        let mapErrorList f x =
+            match x with
+            | Ok o -> o |> Ok
+            | Error ee -> 
+                ee 
+                |> List.map f
+                |> Error
 
         module Operators = 
         
@@ -284,11 +315,7 @@ module Infrastructure =
     /// A projection calculates the current state from
     /// the update with an event with the previous state
     type Projection<'State,'Event> =
-        {
-            Init : 'State
-            Update : 'State -> 'Event -> 'State
-        }
-
+          'State -> 'Event list -> 'State
 
     type QueryResult =
         | Handled of obj
@@ -402,20 +429,32 @@ module Infrastructure =
         let withStreamId streamId (e: Event<_>) = 
             e.Metadata.StreamId = streamId
 
+        let withMetaData md e =
+            {
+                Metadata = {
+                    EventId = md.EventId
+                    StreamId = md.StreamId
+                    RecordedAtUtc = md.RecordedAtUtc
+                    }
+                Event = e
+            }
+            
+
+
     module Projection =
         
-        let project projection events =
-            events |> List.fold projection.Update projection.Init
+        /// Memoize a function `f` according
+        /// to the number of events
+        let memoize f =
+            let cache = ref Map.empty
+            fun evs ->
+                match (!cache).TryFind(evs |> List.length) with
+                | Some r -> r
+                | None ->
+                    let r = evs |> f
+                    cache := (!cache).Add(evs |> List.length, r)
+                    r
 
-        let intoMap projection =
-            fun state event ->
-                state
-                |> Map.tryFind event.Metadata.StreamId
-                |> Option.defaultValue projection.Init
-                |> fun projectionState -> 
-                    event.Event |> projection.Update projectionState
-                |> fun newState -> 
-                    state |> Map.add event.Metadata.StreamId newState
 
 
     module EventStorage =
@@ -469,7 +508,6 @@ module Infrastructure =
                 history |> List.filter (Event.withStreamId streamId)
 
             let initialize history : EventStorage<'Event> =
-    //            let history : Event<'Event> list = []
 
                 let proc (inbox : Agent<Msg<_>>) =
                     let rec loop history =
@@ -530,7 +568,6 @@ module Infrastructure =
                     storage.GetStream streamId
                     |> Async.RunSynchronously
                     |> Helper.printEvents "Stored events in storage:"
-
 
 
         module PostgresStorage =
@@ -613,7 +650,6 @@ module Infrastructure =
                     GetStream = fun streamId -> getStream db_connection streamId
                     Append = fun events -> append db_connection events
                 }
-
 
 
     module EventStore =
@@ -715,7 +751,6 @@ module Infrastructure =
                 store.Get ()
                 |> Async.RunSynchronously
                 |> Helper.printEvents "Get All"
-
 
 
     module EventListener =
@@ -929,8 +964,9 @@ module Infrastructure =
 
                         match msg with
                         | Notify (events, reply) ->
+                            let state = events |> updateState state
                             reply.Reply ()
-                            return! loop (events |> updateState state)
+                            return! loop state
 
                         | State reply ->
                             reply.Reply state
@@ -953,7 +989,6 @@ module Infrastructure =
 
         
             let run () = ()
-
 
 
     type EventSourcedConfig<'Comand,'Event,'Query> =
@@ -1019,25 +1054,18 @@ module Domain =
 
     open System
 
+    
     type HospitalNumber = HospitalNumber of string
 
-    type Name = Name of string
-
-    type BirthDate = BirthDate of DateTime
-
-    type Patient =
-        {
-            HospitalNumber : HospitalNumber
-            LastName : Name
-            FirstName : Name
-            BirthDate : BirthDate
-        }
 
     module HospitalNumber =
+
+        type Event = Invalid of string
 
         let create s = 
             if s = "" then 
                 "Hospital number cannot be an empty string"
+                |> Invalid
                 |> List.singleton
                 |> Result.Error
             else 
@@ -1049,26 +1077,39 @@ module Domain =
         let toString (HospitalNumber s) = s
 
 
+    type Name = Name of string
+
+
     module Name =
 
         open Extensions
 
+        type Event = Invalid of string
+
         let create msg s =
-            if s = "" then msg
-                           |> List.singleton
-                           |> Result.Error
+            if s = "" then 
+                msg
+                |> Invalid         
+                |> List.singleton
+                |> Result.Error
             else 
                 s 
                 |> Name
                 |> Result.Ok
 
         let toString (Name s) = s
-        
+
+
+    type BirthDate = BirthDate of DateTime
+
+
     module BirthDate =
+
+        type Event = Invalid of string
 
         let currentAgeInDays (BirthDate bd) = 
             (DateTime.Now - bd).TotalDays
-            
+        
         let create dt =
             match dt with
             | Some dt ->
@@ -1077,26 +1118,63 @@ module Domain =
                 match age with
                 | _ when age < 0. ->
                     sprintf "A birthdate of %A results in a negative age" dt
+                    |> Invalid
                     |> List.singleton
                     |> Result.Error 
                 | _ when age > (120. * 365.) ->
                     sprintf "A birthdate of %A results in an age > 120 years" dt
+                    |> Invalid
                     |> List.singleton
                     |> Result.Error 
                 | _ -> bd |> Result.Ok
             | None -> 
                 "Birthdate cannot be empty"
+                |> Invalid
                 |> List.singleton
                 |> Result.Error
 
         let toDate (BirthDate dt) = dt
+
+
+    [<CustomEquality; NoComparison>]
+    type Patient =
+        {
+            HospitalNumber : HospitalNumber
+            LastName : Name
+            FirstName : Name
+            BirthDate : BirthDate
+        }
+    with 
+        override __.Equals(obj) =
+            match obj with
+            | :? Patient as p -> __.HospitalNumber = p.HospitalNumber
+            | _ -> false
+        override __.GetHashCode () = 
+            __.HospitalNumber
+            |> box
+            |> hash
+
 
     module Patient =
 
         open Extensions
         open Extensions.Result.Operators
 
-        let create hn ln fn bd : Result<Patient, string list> =
+        type Event =
+            | Registered of Patient
+            | AllReadyRegistered of HospitalNumber
+            | Admitted of HospitalNumber
+            | AllReadyAdmitted of HospitalNumber
+            | Discharged of HospitalNumber
+            | AllReadyDischarged of HospitalNumber
+            | UnknownHospitalNumber of HospitalNumber
+            | HospitalNumberEvent of HospitalNumber.Event
+            | NameEvent of Name.Event
+            | BirthDateEvent of BirthDate.Event
+            | InvalidPatient of Event list
+
+
+        let create hn ln fn bd =
             let f hn ln fn bd =
                 {
                     HospitalNumber = hn
@@ -1106,16 +1184,17 @@ module Domain =
                 }
 
             f
-            <!> HospitalNumber.create hn
-            <*> Name.create "Last name cannot be empty" ln
-            <*> Name.create "First name cannot be empty" fn
-            <*> BirthDate.create bd
+            <!> (Result.mapErrorList HospitalNumberEvent (HospitalNumber.create hn))
+            <*> (Result.mapErrorList NameEvent (Name.create "Last name cannot be empty" ln))
+            <*> (Result.mapErrorList NameEvent (Name.create "First name cannot be empty" fn))
+            <*> (Result.mapErrorList BirthDateEvent (BirthDate.create bd))
 
         type Dto () = 
             member val HospitalNumber  = "" with get, set
             member val LastName = "" with get, set
             member val FirstName = "" with get, set
             member val BirthDate : DateTime Option = None with get, set
+
 
         module Dto = 
 
@@ -1139,7 +1218,7 @@ module Domain =
                 let ds = 
                     dto.BirthDate 
                     |> Option.bind (fun bd ->
-                        bd.ToString("dd-mm-yy")
+                        bd.ToString("dd-mm-yyyy")
                         |> Some
                     )
                     |> Option.defaultValue ""
@@ -1149,46 +1228,52 @@ module Domain =
                         dto.FirstName
                         ds
 
-        type Event =
-            | Registered of Patient
-            | InvalidPatient of string list
-            | AllReadyRegistered of HospitalNumber
-            | Admitted of HospitalNumber
-            | Discharged of HospitalNumber
-            | UnknownHospitalNumber of HospitalNumber
 
         module Projections =
 
             open Infrastructure
 
-            let updateRegisteredPatients (set: Set<_>) event =
+            let updateRegisteredPatients pats event =
                 match event with
                 | Registered pat ->
-                    pat |> set.Add
-                | _ -> set
+                    if pats |> List.exists ((=) pat) then pats
+                    else
+                        pat
+                        |> List.singleton
+                        |> List.append pats
+                | _ -> pats
 
             let registerdPatients =
-                {
-                    Init = Set.empty
-                    Update = updateRegisteredPatients
-                }
+                fun evs ->
+                    evs |> List.fold updateRegisteredPatients []
+                |> Projection.memoize
 
-            let admittedPatients events =
-                let registered = 
-                    events 
-                    |> (Projection.project registerdPatients)
-                    |> Set.toList
+            let admittedPatients =
+                fun evs ->
+                    let registered = 
+                        evs 
+                        |> registerdPatients
 
-                events
-                |> List.fold (fun acc e ->
-                    match e with
-                    | Admitted hn ->
-                        match registered 
-                              |> List.tryFind (fun pat -> pat.HospitalNumber = hn) with
-                        | Some pat -> acc |> List.append [ pat ]
-                        | None -> acc
-                    | _ -> acc
-                ) []
+                    let get hn = 
+                        registered 
+                        |> List.tryFind (fun pat -> pat.HospitalNumber = hn)
+
+                    evs
+                    |> List.fold (fun acc e ->
+                        match e with
+                        | Admitted hn ->
+                            match hn |> get with
+                            | Some pat -> acc |> List.append [ pat ]
+                            | None -> acc
+                        | Discharged hn ->
+                            match hn |> get with
+                            | Some pat -> 
+                                acc 
+                                |> List.remove ((=) pat)
+                            | None -> acc
+                        | _ -> acc
+                    ) []
+                |> Projection.memoize
 
             module Tests =
 
@@ -1223,9 +1308,8 @@ module Domain =
                     // get the registered patients
                     store.GetStream streamId
                     |> Async.RunSynchronously
-                    |> Result.map (Event.asEvents 
-                                   >> (Projection.project registerdPatients))
-                    |> Result.map (fun set -> set |> Set.iter (printfn "%A"))
+                    |> Result.map (Event.asEvents >> registerdPatients)
+                    |> Result.map (fun pats -> pats |> List.iter (printfn "%A"))
                     |> ignore
 
                     // get admitted patients
@@ -1242,18 +1326,43 @@ module Domain =
 
             type Command =
                 | Register of Dto
-                | Admit of HospitalNumber
-                | Discharge of HospitalNumber
+                | Admit of string
+                | Discharge of string
+
+
+            let private isRegistered events hn =
+                events 
+                |> Projections.registerdPatients
+                |> List.exists (fun pat -> pat.HospitalNumber = hn)
+
+            let private isAdmitted events hn =
+                events
+                |> Projections.admittedPatients
+                |> List.exists (fun p -> p.HospitalNumber = hn)
 
             let registerPatient pat events = 
 
-                if events 
-                   |> (Projection.project Projections.registerdPatients) 
-                   |> Set.contains pat then 
+                if pat.HospitalNumber |> isRegistered events then 
                     AllReadyRegistered pat.HospitalNumber
                 else 
                     pat |> Registered
                 |> List.singleton
+
+            let admitPatient hn events = 
+                match hn with
+                | _ when hn |> isRegistered events |> not -> 
+                    hn 
+                    |> UnknownHospitalNumber
+                    |> List.singleton
+                | _ when hn |> isAdmitted events ->
+                    hn 
+                    |> AllReadyAdmitted
+                    |> List.singleton
+                | _ ->
+                    events 
+                    |> Projections.registerdPatients
+                    |> List.filter (fun pat -> pat.HospitalNumber = hn)
+                    |> List.map (fun pat -> pat.HospitalNumber |> Admitted)                    
 
             let behaviour : Behaviour<Command, Event> =
                 fun cmd evs ->
@@ -1264,7 +1373,16 @@ module Domain =
                             evs
                             |> registerPatient pat
                         | Error e -> [ e |> InvalidPatient ]
+                    | Admit s ->
+                        match s |> HospitalNumber.create with
+                        | Result.Ok hn ->
+                            evs 
+                            |> admitPatient hn
+                        | Result.Error e -> 
+                            e 
+                            |> List.map HospitalNumberEvent
                     | _ -> "Not implemented yet" |> exn |> raise
+
 
             module Tests =
 
@@ -1272,7 +1390,7 @@ module Domain =
                 open Extensions
 
                 type Command = TestRegisterPatient
-                
+    
                 // create an event store for the hello world event
                 let store : EventStore<Event> = 
                     EventStorage.InMemoryStorage.initialize []
@@ -1318,6 +1436,160 @@ module Domain =
                     |> Helper.printEvents "Events"
 
 
+        module ReadModels =
+
+            open Infrastructure
+
+            type RegisteredPatient =
+                {
+                    HospitalNumber : string
+                    LastName : string
+                    FirstName : string
+                    Admitted : bool
+                    Discharged : bool
+                }
+
+            type Query = 
+                | GetRegistered
+                | OnlyAdmitted
+                | OnlyDischarged
+
+
+            let hasHospitalNumber (HospitalNumber n) p = p.HospitalNumber = n
+
+
+            let registered () : ReadModel<_, _> =
+                let updateState state evs =
+                    evs
+                    |> Event.asEvents
+                    |> List.fold (fun state e ->
+                        match e with 
+                        | Registered p ->
+                            let exists =
+                                state
+                                |> List.exists (hasHospitalNumber p.HospitalNumber)
+                            if exists then state
+                            else
+                                {
+                                    HospitalNumber = 
+                                        p.HospitalNumber |> HospitalNumber.toString
+                                    LastName = 
+                                        p.LastName |> Name.toString
+                                    FirstName =
+                                        p.FirstName |> Name.toString
+                                    Admitted = false
+                                    Discharged = false
+                                }
+                                |> List.singleton
+                                |> List.append state
+                        | Admitted hn ->
+                            state
+                            |> List.map (fun p ->
+                                if p |> hasHospitalNumber hn |> not then p
+                                else
+                                    { p with Admitted = true
+                                             Discharged = false }
+                            )
+                        | Discharged hn ->
+                            state
+                            |> List.map (fun p ->
+                                if p |> hasHospitalNumber hn |> not then p
+                                else
+                                    { p with Admitted = false
+                                             Discharged = true }
+                            )
+                        | _ -> state
+                    
+
+                    ) state
+
+                ReadModel.inMemory updateState []
+
+
+            let query registered query =
+                match query with
+                | GetRegistered -> 
+                    async {
+                        let! state = registered ()
+        
+                        return 
+                            state 
+                            |> box
+                            |> Handled
+                    }
+                | OnlyAdmitted -> 
+                    async {
+                        let! state = registered ()
+
+                        return 
+                            state 
+                            |> List.filter (fun p -> p.Admitted)
+                            |> box
+                            |> Handled
+                    }
+                | OnlyDischarged -> 
+                    async {
+                        let! state = registered ()
+
+                        return 
+                            state 
+                            |> List.filter (fun p -> p.Discharged)
+                            |> box
+                            |> Handled
+                    }
+
+
+    type Event = 
+        | PatientEvent of Patient.Event
+        | SomeOtherEvent
+
+
+    type Command = 
+        | PatientCommand of Patient.Behaviour.Command
+        | SomeOtherCommand
+
+
+    type Query = 
+        | PatientQuery of Patient.ReadModels.Query
+        | SomeOtherQuery
+
+
+    let behaviour cmd evs =
+        match cmd with
+        | PatientCommand c ->
+            evs
+            |> List.fold (fun acc e -> 
+                match e with
+                | PatientEvent pe -> 
+                    [ pe ] |> List.append acc
+                | _ -> acc
+            ) []
+            |> Patient.Behaviour.behaviour c
+            |> List.map PatientEvent
+        | _ -> evs
+
+
+    open Infrastructure
+
+
+    let mapPatientModel model =
+        {
+            EventHandler = fun evs -> 
+                evs
+                |> List.fold (fun acc e -> 
+                    match e.Event with
+                    | PatientEvent pe -> 
+                        [ pe |> Event.withMetaData e.Metadata ] |> List.append acc
+                    | _ -> acc
+                ) []
+                |> model.EventHandler
+            State = model.State
+        }
+
+
+        
+
+
 module App =
 
     module Patient =
@@ -1328,55 +1600,21 @@ module App =
         [<Literal>]
         let streamId = "Patients-ca75bfa2-e781-463f-850c-d63b84217370"
 
-        module ReadModels =
 
-            open Infrastructure
-            open Domain.Patient
-
-            type Query = 
-                | Registered
-                | Admitted
-                | Discharged
-
-
-            let registered () : ReadModel<_, _> =
-                let updateState state evs =
-                    evs
-                    |> List.fold (Projection.intoMap Projections.registerdPatients) 
-                                    state
-
-                ReadModel.inMemory updateState Map.empty
-
-
-            let queryRegistered registered query =
-                match query with
-                | Registered -> 
-                    async {
-                        let! state = registered ()
-                
-                        return 
-                            state 
-                            |> Map.tryFind streamId
-                            |> Option.defaultValue Set.empty
-                            |> Set.toList
-                            |> box
-                            |> Handled
-                    }
-                | _ -> async { return NotHandled }
-
-
-        let registered = ReadModels.registered ()
+        let registered = 
+            Patient.ReadModels.registered ()
+            |> mapPatientModel
 
         let config = 
             {
                 EventStorageInit =
                     fun () -> EventStorage.InMemoryStorage.initialize []
                 CommandHandlerInit =
-                    CommandHandler.initialize Patient.Behaviour.behaviour
+                    CommandHandler.initialize behaviour
                 QueryHandler =
                     QueryHandler.initialize
                         [
-                            ReadModels.queryRegistered registered.State   
+                            Patient.ReadModels.query registered.State
                         ]
                 EventHandlers =
                     [
@@ -1384,9 +1622,9 @@ module App =
                     ]
             }
 
-        let private app = EventSourced<Patient.Behaviour.Command, 
-                                       Patient.Event, 
-                                       ReadModels.Query>(config)
+        let private app = EventSourced<Command, 
+                                       Event, 
+                                       Patient.ReadModels.Query>(config)
 
         let handleCommand = app.HandleCommand streamId
 
@@ -1418,6 +1656,7 @@ for i in [1..5] do
     dto.HospitalNumber <- i |> string
     dto
     |> Patient.Behaviour.Register
+    |> PatientCommand
     |> App.Patient.handleCommand 
     |> Async.RunSynchronously
     |> Helper.printCommandResults "Register Patient"
@@ -1430,16 +1669,51 @@ App.Patient.getAllEvents ()
 |> Async.RunSynchronously
 |> Helper.printEvents "All Events"
 
-App.Patient.ReadModels.Registered
+Domain.Patient.ReadModels.GetRegistered
 |> App.Patient.handleQuery 
 |> Async.RunSynchronously
 |> function
 | Handled obj ->
+    printfn "Registered patients"
     obj 
     :?> Patient list
     |> List.map (Patient.Dto.toDto >> Patient.Dto.toString)
     |> List.iter (printfn "%s")
 | _ -> ()
+
+Domain.Patient.ReadModels.GetRegistered
+|> App.Patient.handleQuery 
+|> Async.RunSynchronously
+|> function
+| Handled obj ->
+    obj 
+    :?> Domain.Patient.ReadModels.RegisteredPatient list
+    |> List.iter (fun pat ->
+        pat.HospitalNumber
+        |> Patient.Behaviour.Admit
+        |> PatientCommand
+        |> App.Patient.handleCommand
+        |> Async.RunSynchronously
+        |> ignore
+    )
+| _ -> ()
+
+
+Domain.Patient.ReadModels.OnlyAdmitted
+|> App.Patient.handleQuery 
+|> Async.RunSynchronously
+|> function
+| Handled obj ->
+    printfn "Admitted patients"
+    obj 
+    :?> Patient list
+    |> List.map (Patient.Dto.toDto >> Patient.Dto.toString)
+    |> List.iter (printfn "%s")
+| _ -> ()
+
+
+
+
 
 Extensions.Result.Tests.Test.run ()
 Domain.Patient.Behaviour.Tests.run ()
