@@ -4,6 +4,8 @@
 #load ".paket/load/netcoreapp2.2/Npgsql.fsx"
 #load ".paket/load/netcoreapp2.2/main.group.fsx"
 
+#time
+
 
 module Memoization =
 
@@ -22,6 +24,7 @@ module Memoization =
 
 
 module Extensions = 
+
 
     module List =
 
@@ -202,12 +205,48 @@ module Extensions =
             
 module Infrastructure =
 
+    open System
+    open System.Diagnostics
+
+    type Logger = string -> Stopwatch -> obj Option -> unit
+
+    module Logger =
+
+        let noLog : Logger = fun _ _ _ -> ()
+        
+        let logPerf header : Logger =
+            fun s t _ -> 
+                printfn "%s" header
+                printfn "%s: %f" s (t.Elapsed.TotalSeconds)
+
+        let logPrint header : Logger =
+            fun s t o -> 
+                printfn "header"
+                printfn "%s: %f" s (t.Elapsed.TotalSeconds)
+                printfn "%A" o
+
     /// A wrapper for MailboxProcessor that catches all unhandled exceptions
     /// and reports them via the 'OnError' event. Otherwise, the API
     /// is the same as the API of 'MailboxProcessor'
-    type Agent<'T>(f: Agent<'T> -> Async<unit>) as self =
+    type Agent<'T>(f: Agent<'T> -> Async<unit>, logger : Logger) as self =
+
+        let timer = Stopwatch.StartNew ()
+
+        let logAsync s x =
+            timer.Restart ()
+            async { 
+                let! v = x
+                do 
+                    v
+                    |> box
+                    |> Some
+                    |> logger s timer 
+                return v }
+            
+        
         // Create an event for reporting errors
         let errorEvent = Event<_>()
+
         // Start standard MailboxProcessor
         let inbox = new MailboxProcessor<'T>(fun _ ->
             async {
@@ -222,23 +261,48 @@ module Infrastructure =
         member __.Trigger exn = errorEvent.Trigger exn
 
         /// Starts the mailbox processor
-        member __.Start() = inbox.Start()
-        /// Receive a message from the mailbox processor
-        member __.Receive() = inbox.Receive()
-        /// Post a message to the mailbox processor
-        member __.Post(value:'T) = inbox.Post value
+        member __.Start() =
+            timer.Restart ()
+            logger "start"  timer None
+            inbox.Start()
 
+        /// Receive a message from the mailbox processor
+        member __.Receive() = 
+                inbox.Receive()
+                |> logAsync "receive"
+
+        /// Post a message to the mailbox processor
+        member __.Post(value:'T) = 
+            timer.Restart ()
+
+            box value
+            |> Some
+            |> logger "post" timer
+
+            inbox.Post value
+     
         member __.PostAndReply(f: AsyncReplyChannel<'a> -> 'T) = 
             inbox.PostAndReply f
 
         member __.PostAndAsyncReply(f: AsyncReplyChannel<'a> -> 'T) = 
             inbox.PostAndAsyncReply f
+            |> logAsync "reply"
 
-        /// Start the mailbox processor
-        static member Start f =
-            let agent = new Agent<_>(f)
-            agent.Start()
-            agent
+
+        module Agent =
+
+            /// Start the mailbox processor
+            let start f =
+                let agent = new Agent<_>(f, fun _ _ _ -> ())
+                agent.Start()
+                agent
+
+            /// Start the mailbox processor
+            let startWithLogging log f =
+                let agent = new Agent<_>(f, log)
+                agent.Start()
+                agent
+
 
     type EventId = System.Guid
 
@@ -374,8 +438,6 @@ module Infrastructure =
                 let s = (sprintf "Error when retrieving events: %s" error)
                 printError s ""
 
-            // waitForAnyKey()
-
         let runAsync asnc =
             asnc |> Async.RunSynchronously
 
@@ -392,9 +454,6 @@ module Infrastructure =
             | QueryResult.QueryError error ->
                 printError (sprintf "Query Error: %s" error) ""
 
-            // waitForAnyKey()
-
-
         let printCommandResults header result =
             match result with
             | Ok _ ->
@@ -403,9 +462,7 @@ module Infrastructure =
             | Error error ->
               printError (sprintf "Command Error: %s" error) ""
 
-            // waitForAnyKey()
            
-
     module Event =
 
         let enveloped streamId events =
@@ -442,25 +499,112 @@ module Infrastructure =
 
 
     module Projection =
-        
-        /// Memoize a function `f` according
-        /// to the number of events
-        let memoize f =
-            let cache = ref Map.empty
-            fun evs ->
-                match (!cache).TryFind(evs |> List.length) with
-                | Some r -> r
-                | None ->
-                    let r = evs |> f
-                    cache := (!cache).Add(evs |> List.length, r)
-                    r
 
+        type private Cache<'T> () =
+            member val Count = 0 with get, set
+            member val State : 'T Option  = None with get, set
+
+        /// Cache a projection `p` according
+        /// to the number of events
+        let cache init f =
+            let cache = new Cache<_>()
+            fun xs ->
+                let count = xs |> List.length
+                let state =
+                    match cache.State with
+                    | Some s -> 
+                        // printfn "using cache with count: %i" count
+                        (cache.Count, s)
+                        // (0, init)
+                    | None -> (0, init)
+                    |> (fun (c, s) ->
+                        xs
+                        |> List.skip c
+                        |> List.fold f s
+                    )
+                cache.Count <- count
+                cache.State <- state |> Some
+                state
+
+        let cacheFold init f =
+            let cache = new Cache<_>()
+            fun xs ->
+                let count = xs |> List.length
+                let state =
+                    match cache.State with
+                    | Some s -> 
+                        // (0, init) 
+                        (cache.Count, s)
+                    | None -> (0, init)
+                    |> (fun (c, s) ->
+                        xs
+                        |> List.skip c
+                        |> f s
+                    )
+                cache.Count <- count
+                cache.State <- state |> Some
+                state
+
+
+        module Tests =
+
+            type Event = Count of int
+
+            let projection =
+                fun s (Count n) ->
+                    System.Threading.Thread.Sleep 10
+                    s + n
+                
+
+            let run () =
+                let cached = cache 0 projection
+                
+                printfn "Running original version"
+                1
+                |> List.replicate 100
+                |> List.map Count
+                |> List.fold projection 0
+                |> printfn "Count %i"
+
+                printfn "Running original version extra"
+                1
+                |> List.replicate 200
+                |> List.map Count
+                |> List.fold projection 0
+                |> printfn "Count %i"
+
+                printfn "Running cached version"
+                1
+                |> List.replicate 100
+                |> List.map Count
+                |> cached
+                |> printfn "Count %i"
+
+                printfn "Running cached version twice"
+                1
+                |> List.replicate 100
+                |> List.map Count
+                |> cached
+                |> printfn "Count %i"
+
+                printfn "Running cached version extra"
+                1
+                |> List.replicate 200
+                |> List.map Count
+                |> cached
+                |> printfn "Count %i"
+
+                printfn "Running cached version with empty list"
+                []
+                |> List.map Count
+                |> cached
+                |> printfn "Count %i"
 
 
     module EventStorage =
 
         module FileStorage =
-
+        
             open System.IO
             open Thoth.Json.Net
             open Extensions
@@ -498,18 +642,47 @@ module Infrastructure =
 
         module InMemoryStorage =
 
+            type private Cache<'Event> =
+                {
+                    Count : int
+                    Stream : Event<'Event> list
+                }
+
             type Msg<'Event> =
                 private
                 | Get of AsyncReplyChannel<EventResult<'Event>>
                 | GetStream of StreamId * AsyncReplyChannel<EventResult<'Event>>
                 | Append of Event<'Event> list * AsyncReplyChannel<unit>
 
-            let private streamFor streamId history =
-                history |> List.filter (Event.withStreamId streamId)
+            let private streamFor<'Event> () =
+                let cache : Map<StreamId, Cache<_>> ref = ref Map.empty
+                fun (streamId : StreamId) (history : Event<'Event> list ) ->
+                    match (!cache).TryFind(streamId) with
+                    | Some { Count = c; Stream = stream } -> 
+                        (c, stream)
+                        // (0, [])
+                    | None -> 
+                        (0, [])
+                    |> fun (c, stream) ->
+                        let newStream =
+                            history 
+                            |> List.skip c
+                            |> List.filter (Event.withStreamId streamId)
+                            |> List.append stream
+                        let newCache = 
+                            {
+                                Count = history |> List.length
+                                Stream = newStream
+                            }
+                        cache := (!cache).Add(streamId, newCache)
+                        newStream
+                        
 
-            let initialize history : EventStorage<'Event> =
+            let private _initialize log history : EventStorage<'Event> =
 
                 let proc (inbox : Agent<Msg<_>>) =
+                    let streamFor = streamFor ()
+
                     let rec loop history =
                         async {
                             let! msg = inbox.Receive()
@@ -537,7 +710,8 @@ module Infrastructure =
 
                     loop history
 
-                let agent = Agent<Msg<_>>.Start(proc)
+                let agent = 
+                    Agent.startWithLogging log proc
 
                 {
                     Get = fun () ->  agent.PostAndAsyncReply Get
@@ -551,23 +725,32 @@ module Infrastructure =
                         )
                 }
 
+            let initialize history = _initialize Logger.noLog history
+
+            let initializeWithLogging log history = _initialize log history
+
             module Tests =
+
+                open System.Diagnostics
+                
+                let streamId = "helloWorld"
     
                 type Event = | HelloWorld
 
-                let storage : EventStorage<Event> = initialize []
-
-                let run () =
-                    let streamId = "helloWorld"
-                    HelloWorld 
-                    |> List.replicate 10
+                let storage : EventStorage<Event> = 
+                    HelloWorld
+                    |> List.replicate 10000
                     |> Event.enveloped streamId
-                    |> storage.Append
-                    |> ignore
+                    |> initializeWithLogging (Logger.logPerf "inmemory storage")
 
-                    storage.GetStream streamId
-                    |> Async.RunSynchronously
-                    |> Helper.printEvents "Stored events in storage:"
+                let run n =
+                    for _ in [1..n] do
+                        HelloWorld 
+                        |> List.singleton
+                        |> Event.enveloped streamId
+                        |> storage.Append
+                        |> Async.RunSynchronously
+                        |> ignore
 
 
         module PostgresStorage =
@@ -659,7 +842,7 @@ module Infrastructure =
             | GetStream of StreamId * AsyncReplyChannel<EventResult<'Event>>
             | Append of Event<'Event> list * AsyncReplyChannel<Result<unit,string>>
 
-        let initialize (storage : EventStorage<_>) : EventStore<_> =
+        let _initialize logger (storage : EventStorage<_>) : EventStore<_> =
             let eventsAppended = Event<Event<_> list>()
 
             let proc (inbox : Agent<Msg<_>>) =
@@ -701,7 +884,7 @@ module Infrastructure =
 
                 loop ()
 
-            let agent =  Agent<Msg<_>>.Start(proc)
+            let agent =  Agent.startWithLogging logger proc
 
             {
                 Get = fun () -> agent.PostAndAsyncReply Get
@@ -713,6 +896,10 @@ module Infrastructure =
                 OnEvents = eventsAppended.Publish
             }
 
+        let initialize storage = _initialize Logger.noLog storage
+
+        let initializeWithLogger logger storage = _initialize logger storage
+
         module Tests =
 
             type Event = | HelloWorld
@@ -720,37 +907,39 @@ module Infrastructure =
             // create an event store for the hello world event
             let store : EventStore<Event> = 
                 EventStorage.InMemoryStorage.initialize []
-                |> initialize
+                |> initializeWithLogger (Logger.logPerf "eventstore")
 
             // will print out received event envelopes
-            store.OnEvents.Add (printfn "Received: %A")
+            // store.OnEvents.Add (printfn "Received: %A")
             
             // run the tests
-            let run () =
+            let run n =
                 let streamId = "helloworld1"
                 
                 HelloWorld
-                |> List.replicate 5
+                |> List.replicate n
                 |> Event.enveloped streamId
                 |> store.Append
-                |> ignore
+                |> Async.RunSynchronously
+                |> (fun _ -> printfn "ready stream 1")
 
                 let streamId = "helloworld2"
                 HelloWorld
-                |> List.replicate 5
+                |> List.replicate n
                 |> Event.enveloped streamId
                 |> store.Append
-                |> ignore
+                |> Async.RunSynchronously
+                |> (fun _ -> printfn "ready stream 2")
                 
                 // get the appended events
                 store.GetStream streamId
                 |> Async.RunSynchronously
-                |> Helper.printEvents "Get Stream"
+                |> (fun _ -> printfn "ready get stream 1")
 
                 // get all appended events
                 store.Get ()
                 |> Async.RunSynchronously
-                |> Helper.printEvents "Get All"
+                |> (fun _ -> printfn "ready get stream 2")
 
 
     module EventListener =
@@ -766,7 +955,7 @@ module Infrastructure =
             |> Async.Parallel
             |> Async.Ignore
 
-        let initialize () : EventListener<_> =
+        let _initialize logger : EventListener<_> =
 
             let proc (inbox : Agent<Msg<_>>) =
                 let rec loop (eventHandlers : EventHandler<'Event> list) =
@@ -783,18 +972,24 @@ module Infrastructure =
 
                 loop []
 
-            let agent = Agent<Msg<_>>.Start(proc)
+            let agent = Agent.startWithLogging logger proc
 
             {
                 Notify = Notify >> agent.Post
                 Subscribe = Subscribe >> agent.Post
             }
 
+
+        let initialize () = _initialize Logger.noLog
+
+        let initializeWithLogger logger = _initialize logger
+
         module Tests =
 
             type Event = HelloWorld
 
-            let listener : EventListener<Event> = initialize()
+            let listener : EventListener<Event> = 
+                initializeWithLogger (Logger.logPrint "event listener")
 
             let handler : EventHandler<Event> = fun ees ->
                 async { return printfn "Handled: %A" ees }
@@ -858,8 +1053,10 @@ module Infrastructure =
         type Msg<'Event, 'Command> =
             | Handle of StreamId * 'Command * AsyncReplyChannel<Result<unit,string>>
 
-        let initialize (behaviour : Behaviour<_,_>) 
-                       (eventStore : EventStore<_>) : CommandHandler<_> =
+        let private _initialize logger
+                                (behaviour : Behaviour<_,_>) 
+                                (eventStore : EventStore<_>) : CommandHandler<_> =
+            
             let proc (inbox : Agent<Msg<_, _>>) =
                 let rec loop () =
                     async {
@@ -891,7 +1088,7 @@ module Infrastructure =
 
                 loop ()
 
-            let agent = Agent<Msg<_, _>>.Start(proc)
+            let agent = Agent.startWithLogging logger proc
 
             {
                 Handle = fun streamId command -> 
@@ -901,6 +1098,12 @@ module Infrastructure =
                 OnError = agent.OnError
             }
 
+        let initialize behaviour eventstore = 
+            _initialize Logger.noLog behaviour eventstore
+
+        let initializeWithLogging logger behaviour eventstore = 
+            _initialize logger behaviour eventstore
+        
         module Tests =
 
             type Command = HelloWordCommand of string
@@ -908,44 +1111,45 @@ module Infrastructure =
             type Event = HelloWordEvent of string
 
             // create an event store for the hello world event
-            let store : EventStore<Event> = 
-                EventStorage.InMemoryStorage.initialize []
-                |> EventStore.initialize
+            let store n : EventStore<Event> = 
+                HelloWordEvent "Init"
+                |> List.replicate n
+                |> Event.enveloped "helloworld"
+                |> EventStorage.InMemoryStorage.initializeWithLogging 
+                    (Logger.logPerf "in memory storage")
+                |> EventStore.initializeWithLogger (Logger.logPerf "eventstore")
+                    
 
             let behaviour : Behaviour<Command, Event> =
                 fun cmd ees ->
                     match cmd with
                     | HelloWordCommand s -> 
-                        if ees |> List.length >= 1 then []
-                        else
-                            HelloWordEvent s
-                            |> List.replicate 2
+                        HelloWordEvent s
+                        |> List.replicate 2
 
-            let handler =
-                initialize behaviour store
+            let handler store =
+                initializeWithLogging (Logger.logPerf "event handler") behaviour store
 
-            let run () =
+            let run n1 n2 =
                 let streamId = "helloworld"
+
+                let store = store n1
+                let handler = handler store
                 
-                "Hello World"
-                |> HelloWordCommand
-                |> handler.Handle streamId
-                |> Async.RunSynchronously
-                |> printfn "%A"
+                for i in [1..n2] do
+                    "Hello World"
+                    |> HelloWordCommand
+                    |> handler.Handle streamId
+                    |> Async.RunSynchronously
+                    |> ignore
 
                 store.Get ()
                 |> Async.RunSynchronously
-                |> Helper.printEvents "Events"
-
-                "Hello World"
-                |> HelloWordCommand
-                |> handler.Handle streamId
-                |> Async.RunSynchronously
-                |> printfn "%A"
-
-                store.Get ()
-                |> Async.RunSynchronously
-                |> Helper.printEvents "Events"
+                |> function
+                | Ok evs -> 
+                    evs 
+                    |> List.length
+                | Error _ -> 0
 
 
     module ReadModel =
@@ -954,7 +1158,8 @@ module Infrastructure =
             | Notify of Event<'Event> list * AsyncReplyChannel<unit>
             | State of AsyncReplyChannel<'Result>
 
-        let inMemory (updateState : 'State -> Event<'Event> list -> 'State) 
+        let _inMemory logger
+                     (updateState : 'State -> Event<'Event> list -> 'State) 
                      (initState : 'State) : ReadModel<'Event, 'State> =
             let agent =
                 let eventSubscriber (inbox : Agent<Msg<_,_>>) =
@@ -975,7 +1180,7 @@ module Infrastructure =
 
                     loop initState
 
-                Agent<Msg<_,_>>.Start(eventSubscriber)
+                Agent.startWithLogging logger eventSubscriber
 
             {
                 EventHandler = fun eventEnvelopes -> 
@@ -984,6 +1189,10 @@ module Infrastructure =
                     )
                 State = fun () -> agent.PostAndAsyncReply State
             }
+
+        let inMemory update init = _inMemory Logger.noLog update init
+        
+        let inMemoryWithLogger update init logger = _inMemory logger update init
 
         module Tests =
 
@@ -1242,38 +1451,40 @@ module Domain =
                         |> List.singleton
                         |> List.append pats
                 | _ -> pats
+            
+            let registeredPatients = Projection.cache [] updateRegisteredPatients
 
-            let registerdPatients =
-                fun evs ->
-                    evs |> List.fold updateRegisteredPatients []
-                |> Projection.memoize
+            let updateAdmittedPatients registered pats event =
+                let get hn = 
+                    registered 
+                    |> List.tryFind (fun pat -> pat.HospitalNumber = hn)
+
+                match event with
+                | Admitted hn ->
+                    match hn |> get with
+                    | Some pat -> pats |> List.append [ pat ]
+                    | None -> pats
+                | Discharged hn ->
+                    match hn |> get with
+                    | Some pat -> 
+                        pats 
+                        |> List.remove ((=) pat)
+                    | None -> pats
+                | _ -> pats
 
             let admittedPatients =
-                fun evs ->
+                fun pats evs ->
                     let registered = 
                         evs 
-                        |> registerdPatients
+                        |> registeredPatients
 
                     let get hn = 
                         registered 
                         |> List.tryFind (fun pat -> pat.HospitalNumber = hn)
 
                     evs
-                    |> List.fold (fun acc e ->
-                        match e with
-                        | Admitted hn ->
-                            match hn |> get with
-                            | Some pat -> acc |> List.append [ pat ]
-                            | None -> acc
-                        | Discharged hn ->
-                            match hn |> get with
-                            | Some pat -> 
-                                acc 
-                                |> List.remove ((=) pat)
-                            | None -> acc
-                        | _ -> acc
-                    ) []
-                |> Projection.memoize
+                    |> List.fold (updateAdmittedPatients registered) pats
+                |> Projection.cacheFold []
 
             module Tests =
 
@@ -1308,7 +1519,7 @@ module Domain =
                     // get the registered patients
                     store.GetStream streamId
                     |> Async.RunSynchronously
-                    |> Result.map (Event.asEvents >> registerdPatients)
+                    |> Result.map (Event.asEvents >> registeredPatients)
                     |> Result.map (fun pats -> pats |> List.iter (printfn "%A"))
                     |> ignore
 
@@ -1332,7 +1543,7 @@ module Domain =
 
             let private isRegistered events hn =
                 events 
-                |> Projections.registerdPatients
+                |> Projections.registeredPatients
                 |> List.exists (fun pat -> pat.HospitalNumber = hn)
 
             let private isAdmitted events hn =
@@ -1360,7 +1571,7 @@ module Domain =
                     |> List.singleton
                 | _ ->
                     events 
-                    |> Projections.registerdPatients
+                    |> Projections.registeredPatients
                     |> List.filter (fun pat -> pat.HospitalNumber = hn)
                     |> List.map (fun pat -> pat.HospitalNumber |> Admitted)                    
 
@@ -1539,6 +1750,16 @@ module Domain =
                     }
 
 
+module App =
+
+
+    open Infrastructure 
+    open Domain
+
+    [<Literal>]
+    let streamId = "Patients-ca75bfa2-e781-463f-850c-d63b84217370"
+
+
     type Event = 
         | PatientEvent of Patient.Event
         | SomeOtherEvent
@@ -1569,9 +1790,6 @@ module Domain =
         | _ -> evs
 
 
-    open Infrastructure
-
-
     let mapPatientModel model =
         {
             EventHandler = fun evs -> 
@@ -1586,53 +1804,49 @@ module Domain =
             State = model.State
         }
 
+    let patientQuery state = function 
+        | PatientQuery qry ->
+            Patient.ReadModels.query state qry
+        | _ -> async { return NotHandled }
 
+
+    let registered = 
+        Patient.ReadModels.registered ()
+        |> mapPatientModel
+
+
+    let config = 
+        let storageLog = Logger.noLog // Logger.logPerf "storage"
+        let commandLog = Logger.noLog // Logger.logPerf "command"
         
-
-
-module App =
-
-    module Patient =
-
-        open Infrastructure 
-        open Domain
-
-        [<Literal>]
-        let streamId = "Patients-ca75bfa2-e781-463f-850c-d63b84217370"
-
-
-        let registered = 
-            Patient.ReadModels.registered ()
-            |> mapPatientModel
-
-        let config = 
-            {
-                EventStorageInit =
-                    fun () -> EventStorage.InMemoryStorage.initialize []
-                CommandHandlerInit =
-                    CommandHandler.initialize behaviour
-                QueryHandler =
-                    QueryHandler.initialize
-                        [
-                            Patient.ReadModels.query registered.State
-                        ]
-                EventHandlers =
+        {
+            EventStorageInit =
+                fun () -> 
+                    EventStorage.InMemoryStorage.initializeWithLogging storageLog []
+            CommandHandlerInit =
+                CommandHandler.initializeWithLogging commandLog behaviour
+            QueryHandler =
+                QueryHandler.initialize
                     [
-                        registered.EventHandler
+                        patientQuery registered.State
                     ]
-            }
+            EventHandlers =
+                [
+                    registered.EventHandler
+                ]
+        }
 
-        let private app = EventSourced<Command, 
-                                       Event, 
-                                       Patient.ReadModels.Query>(config)
+    let private app = EventSourced<Command, 
+                                    Event, 
+                                    Query>(config)
 
-        let handleCommand = app.HandleCommand streamId
+    let handleCommand = app.HandleCommand streamId
 
-        let getStream  () = app.GetStream streamId
+    let getStream  () = app.GetStream streamId
 
-        let getAllEvents = app.GetAllEvents
+    let getAllEvents = app.GetAllEvents
 
-        let handleQuery = app.HandleQuery
+    let handleQuery = app.HandleQuery
 
 
 
@@ -1646,43 +1860,62 @@ dto.FirstName <- "Test2"
 dto.LastName <- "Test2"
 dto.BirthDate <- DateTime.Now.AddDays(-2000.) |> Some
 
-for i in [1..5] do
-    let n = 
-        dto.HospitalNumber
-        |> (fun n -> if n = "" then "0" else n)
-        |> System.Int32.Parse 
-        |> ((+) 1)
-
-    dto.HospitalNumber <- i |> string
-    dto
-    |> Patient.Behaviour.Register
-    |> PatientCommand
-    |> App.Patient.handleCommand 
+let count () =
+    App.getAllEvents ()
     |> Async.RunSynchronously
-    |> Helper.printCommandResults "Register Patient"
+    |>  (fun r ->
+        match r with
+        | Ok evs -> 
+            evs
+            |> List.length
+        | Error _ -> 0
+    )
 
-App.Patient.getStream ()
+let perform n =
+    let c = count ()
+    for _ in [1..n] do
+        let n = 
+            dto.HospitalNumber
+            |> (fun hn -> if hn = "" then "0" else hn)
+            |> System.Int32.Parse 
+            |> ((+) 1)
+            |> string
+        // System.Threading.Thread.Sleep(1000)
+        dto.HospitalNumber <- n //|> string
+        dto
+        |> Patient.Behaviour.Register
+        |> App.PatientCommand
+        |> App.handleCommand
+        |> Async.RunSynchronously
+        |> ignore
+
+    while not (count () = n + c) do ()
+    
+    printfn "count: %i" (count ())
+
+            
+App.getStream ()
 |> Async.RunSynchronously
 |> Helper.printEvents "Patients Events"
 
-App.Patient.getAllEvents ()
+App.getAllEvents ()
 |> Async.RunSynchronously
 |> Helper.printEvents "All Events"
 
 Domain.Patient.ReadModels.GetRegistered
-|> App.Patient.handleQuery 
+|> App.PatientQuery
+|> App.handleQuery 
 |> Async.RunSynchronously
 |> function
 | Handled obj ->
     printfn "Registered patients"
     obj 
-    :?> Patient list
-    |> List.map (Patient.Dto.toDto >> Patient.Dto.toString)
-    |> List.iter (printfn "%s")
+    |> (fun o -> (printfn "got %A") o)
 | _ -> ()
 
 Domain.Patient.ReadModels.GetRegistered
-|> App.Patient.handleQuery 
+|> App.PatientQuery
+|> App.handleQuery 
 |> Async.RunSynchronously
 |> function
 | Handled obj ->
@@ -1691,31 +1924,39 @@ Domain.Patient.ReadModels.GetRegistered
     |> List.iter (fun pat ->
         pat.HospitalNumber
         |> Patient.Behaviour.Admit
-        |> PatientCommand
-        |> App.Patient.handleCommand
-        |> Async.RunSynchronously
+        |> App.PatientCommand
+        |> App.handleCommand
+//        |> Async.RunSynchronously
         |> ignore
     )
 | _ -> ()
 
 
 Domain.Patient.ReadModels.OnlyAdmitted
-|> App.Patient.handleQuery 
+|> App.PatientQuery
+|> App.handleQuery 
 |> Async.RunSynchronously
 |> function
 | Handled obj ->
     printfn "Admitted patients"
     obj 
-    :?> Patient list
-    |> List.map (Patient.Dto.toDto >> Patient.Dto.toString)
-    |> List.iter (printfn "%s")
+    |> (fun o -> (printfn "got %A") o)
 | _ -> ()
 
 
+for i in [1..1000] do
+    let n = 
+        dto.HospitalNumber
+        |> (fun n -> if n = "" then "0" else n)
+        |> System.Int32.Parse 
+        |> ((+) 1)
 
-
+    dto.HospitalNumber <- i |> string
+    dto
+    |> Patient.Dto.fromDto
+    |> (printfn "%A")
 
 Extensions.Result.Tests.Test.run ()
 Domain.Patient.Behaviour.Tests.run ()
 
-                                                                                                   
+
