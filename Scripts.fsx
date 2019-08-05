@@ -519,7 +519,7 @@ module Infrastructure =
                     | None -> (0, init)
                     |> (fun (c, s) ->
                         xs
-                        |> List.skip c
+                        |> List.skip (if c > count then 0 else c)
                         |> List.fold f s
                     )
                 cache.Count <- count
@@ -537,9 +537,11 @@ module Infrastructure =
                         (cache.Count, s)
                     | None -> (0, init)
                     |> (fun (c, s) ->
-                        xs
-                        |> List.skip c
-                        |> f s
+                        if c > count then f s xs
+                        else
+                            xs
+                            |> List.skip c
+                            |> f s
                     )
                 cache.Count <- count
                 cache.State <- state |> Some
@@ -1926,7 +1928,7 @@ Domain.Patient.ReadModels.GetRegistered
         |> Patient.Behaviour.Admit
         |> App.PatientCommand
         |> App.handleCommand
-//        |> Async.RunSynchronously
+        |> Async.RunSynchronously
         |> ignore
     )
 | _ -> ()
