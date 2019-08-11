@@ -63,6 +63,12 @@ publishnuget.cmd
 # Add source files
 !/scripts/
 !/src/
+!/src/Agent/
+!/src/Extensions/
+!/src/EventSourced/
+!/src/EventSourced/Utils/
+!/src/EventSourced/EventStorage/
+!/src/Scripts/
 
 # Add test files
 !/tests/

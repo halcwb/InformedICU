@@ -4,12 +4,14 @@
 #load ".paket/load/netcoreapp2.2/Npgsql.fsx"
 #load ".paket/load/netcoreapp2.2/main.group.fsx"
 
-#time
+#load "src/Extensions/List.fs"
+#load "src/Extensions/Option.fs"
+#load "src/Extensions/Result.fs"
 
+#time
 
 module Memoization =
 
-    
     /// Memoize a function `f` according
     /// to its parameter
     let memoize f =
@@ -22,191 +24,13 @@ module Memoization =
                 cache := (!cache).Add(x, r)
                 r
 
-
-module Extensions = 
-
-
-    module List =
-
-        /// Map a Result producing function over a list to get a new Result
-        /// ('a -> Result<'b>) -> 'a list -> Result<'b list>
-        let traverseResult f list =
-
-            // define the monadic functions
-            let (>>=) x f = Result.bind f x
-            let ok = Result.Ok
-
-            // right fold over the list
-            let initState = ok []
-            let folder head tail =
-                f head >>= (fun h ->
-                tail >>= (fun t ->
-                ok (h :: t) ))
-
-            List.foldBack folder list initState
-
-
-        let remove eqs xs = 
-            xs
-            |> List.fold (fun acc x ->
-                if x |> eqs then acc
-                else acc @ [x]
-            ) []
-
-        module Tests =
-        
-            let f1 x : Result<_, string> = Result.Ok x
-            let f2 _ : Result<string, _> = Result.Error "always fails"
-
-            traverseResult f1 [ "a" ] // returns OK [ "a" ]
-            traverseResult f2 [ "a" ] // returns Error "always fails"
-
-
-    module Option =
-
-        type OptionBuilder() =
-            member x.Bind(v,f) = Option.bind f v
-            member x.Return v = Some v
-            member x.ReturnFrom o = o
-            member x.Zero () = None
-
-        let option = OptionBuilder()
-
-        module Tests =
-
-            let twice x =
-                option {
-                    let! v = x
-                    return v + v
-                }
-
-            Some ("x") |> twice // returns Some "xx"
-            None |> twice       // returns None
-
-
-    module Result = 
-
-        let isOk (result : Result<_, _>) =
-            match result with
-            | Ok _ -> true
-            | Error _ -> false
-
-        let get (result : Result<_, _>) =
-            match result with
-            | Ok r -> r
-            | Error e -> 
-                e.ToString () 
-                |> exn 
-                |> raise
-
-        let either success failure x =
-            match x with
-            | Ok s -> s |> success
-            | Error e -> e |> failure
-
-
-        /// given a function wrapped in a result
-        /// and a value wrapped in a result
-        /// apply the function to the value only if both are Success
-        let applyR add f x =
-            match f, x with
-            | Ok f, Ok x -> 
-                x 
-                |> f 
-                |> Ok 
-            | Error e, Ok _ 
-            | Ok _, Error e -> 
-                e |> Error
-            | Error e1, Error e2 -> 
-                add e1 e2 |> Error 
-
-        /// given a function that transforms a value
-        /// apply it only if the result is on the Success branch
-        let liftR f x =
-            let f' =  f |> Result.Ok
-            applyR (List.append) f' x
-
-        let mapErrorList f x =
-            match x with
-            | Ok o -> o |> Ok
-            | Error ee -> 
-                ee 
-                |> List.map f
-                |> Error
-
-        module Operators = 
-        
-            let (>>=) = Result.bind
-
-            let (<<=) x f = Result.bind f x
-
-            let (>=>) f1 f2 = f1 >> f2
-
-            /// infix version of apply
-            let (<*>) f x = applyR List.append f x
-
-            let (<!>) = liftR
-
-        module Tests =
-
-            type Name = Name of string
-
-            type Value = Value of float
-
-            module Name =
-
-                let create s = 
-                    if s = "" then "Name cannot be empty" 
-                                   |> List.singleton
-                                   |> Result.Error
-                    else s 
-                         |> Name
-                         |> Result.Ok
-
-            module Value =
-
-                let create v =
-                    if v < 0. then "Value must be greater than 0" 
-                                   |> List.singleton
-                                   |> Result.Error
-                    else v
-                         |> Value
-                         |> Result.Ok
-
-            type Test = 
-                {
-                    Name : Name
-                    Value1 : Value
-                    Value2 : Value
-                }
-
-            module Test =
-
-                open Operators
-
-                let create n v1 v2 =
-                    let f n v1 v2 =
-                        {
-                            Name = n
-                            Value1 = v1
-                            Value2 = v2
-                        }
-
-                    f
-                    <!> Name.create n
-                    <*> Value.create v1
-                    <*> Value.create v2
-
-                let run () =
-                    
-                    create "" -1. -1.
-                    |> printfn "%A"
-
             
 module Infrastructure =
 
     open System
     open System.Diagnostics
+    
+    open InformedICU.Extensions
 
     type Logger = string -> Stopwatch -> obj Option -> unit
 
@@ -308,11 +132,6 @@ module Infrastructure =
 
     type StreamId = string
 
-    /// Produces a new list of events based on
-    /// a list of previous events
-    type EventProducer<'Event> =
-        'Event list -> 'Event list
-
     /// Store te event metadata like the
     /// aggregate id and the creation time
     type EventMetadata =
@@ -403,7 +222,7 @@ module Infrastructure =
       }
 
     type Behaviour<'Command,'Event> =
-      'Command -> EventProducer<'Event>
+      'Command -> 'Event list
 
     type DB_Connection_String = DB_Connection_String of string
     
@@ -496,7 +315,6 @@ module Infrastructure =
                 Event = e
             }
             
-
 
     module Projection =
 
@@ -609,7 +427,7 @@ module Infrastructure =
         
             open System.IO
             open Thoth.Json.Net
-            open Extensions
+            open InformedICU.Extensions
 
             let private get store =
                 store
@@ -760,8 +578,8 @@ module Infrastructure =
             open Npgsql.FSharp
             open Thoth.Json.Net
             open Helper
-            open Extensions
-            open Extensions.Option
+            open InformedICU.Extensions
+            open InformedICU.Extensions.Option.Builder
 
             let select = "SELECT metadata, payload FROM event_store"
             let order = "ORDER BY recorded_at_utc ASC, event_index ASC"
@@ -1066,22 +884,13 @@ module Infrastructure =
 
                         match msg with
                         | Handle (streamId, command, reply) ->
-                            let! stream = streamId |> eventStore.GetStream
 
-                            let newEvents =
-                                stream 
-                                |> Result.map (fun evs ->
-                                    evs
-                                    |> Event.asEvents 
-                                    |> behaviour command 
-                                    |> Event.enveloped streamId
-                                )
+                            let events =
+                                command
+                                |> behaviour 
+                                |> Event.enveloped streamId
 
-                            let! result =
-                                newEvents
-                                |> function
-                                    | Ok events -> eventStore.Append events
-                                    | Error err -> async { return Error err }
+                            let! result = eventStore.Append events
 
                             do reply.Reply result
 
@@ -1123,7 +932,7 @@ module Infrastructure =
                     
 
             let behaviour : Behaviour<Command, Event> =
-                fun cmd ees ->
+                fun cmd ->
                     match cmd with
                     | HelloWordCommand s -> 
                         HelloWordEvent s
@@ -1287,13 +1096,15 @@ module Domain =
 
         let toString (HospitalNumber s) = s
 
+        let eqsString s (HospitalNumber n) = s = n
 
     type Name = Name of string
 
 
+
     module Name =
 
-        open Extensions
+        open InformedICU.Extensions
 
         type Event = Invalid of string
 
@@ -1368,17 +1179,24 @@ module Domain =
 
     module Patient =
 
-        open Extensions
-        open Extensions.Result.Operators
+        open InformedICU.Extensions
+        open InformedICU.Extensions.Result.Operators
+
+        type Dto () = 
+            member val HospitalNumber  = "" with get, set
+            member val LastName = "" with get, set
+            member val FirstName = "" with get, set
+            member val BirthDate : DateTime Option = None with get, set
+
 
         type Event =
-            | Registered of Patient
-            | AllReadyRegistered of HospitalNumber
-            | Admitted of HospitalNumber
-            | AllReadyAdmitted of HospitalNumber
-            | Discharged of HospitalNumber
-            | AllReadyDischarged of HospitalNumber
-            | UnknownHospitalNumber of HospitalNumber
+            | Registered of Dto
+            | AllReadyRegistered of string
+            | Admitted of string
+            | AllReadyAdmitted of string
+            | Discharged of string
+            | AllReadyDischarged of string
+            | UnknownHospitalNumber of string
             | HospitalNumberEvent of HospitalNumber.Event
             | NameEvent of Name.Event
             | BirthDateEvent of BirthDate.Event
@@ -1399,13 +1217,6 @@ module Domain =
             <*> (Result.mapErrorList NameEvent (Name.create "Last name cannot be empty" ln))
             <*> (Result.mapErrorList NameEvent (Name.create "First name cannot be empty" fn))
             <*> (Result.mapErrorList BirthDateEvent (BirthDate.create bd))
-
-        type Dto () = 
-            member val HospitalNumber  = "" with get, set
-            member val LastName = "" with get, set
-            member val FirstName = "" with get, set
-            member val BirthDate : DateTime Option = None with get, set
-
 
         module Dto = 
 
@@ -1444,30 +1255,32 @@ module Domain =
 
             open Infrastructure
 
-            let updateRegisteredPatients pats event =
+            let updateRegisteredPatients dtos event =
                 match event with
-                | Registered pat ->
-                    if pats |> List.exists ((=) pat) then pats
+                | Registered dto ->
+                    if dtos |> List.exists ((=) dto) then dtos
                     else
-                        pat
+                        dto
                         |> List.singleton
-                        |> List.append pats
-                | _ -> pats
+                        |> List.append dtos
+                | _ -> dtos
             
             let registeredPatients = Projection.cache [] updateRegisteredPatients
 
             let updateAdmittedPatients registered pats event =
-                let get hn = 
+                let find s = 
                     registered 
-                    |> List.tryFind (fun pat -> pat.HospitalNumber = hn)
+                    |> List.tryFind (fun (dto : Dto) -> 
+                        dto.HospitalNumber = s
+                    )
 
                 match event with
-                | Admitted hn ->
-                    match hn |> get with
+                | Admitted s ->
+                    match s |> find with
                     | Some pat -> pats |> List.append [ pat ]
                     | None -> pats
-                | Discharged hn ->
-                    match hn |> get with
+                | Discharged s ->
+                    match s |> find with
                     | Some pat -> 
                         pats 
                         |> List.remove ((=) pat)
@@ -1480,18 +1293,19 @@ module Domain =
                         evs 
                         |> registeredPatients
 
-                    let get hn = 
+                    let find s = 
                         registered 
-                        |> List.tryFind (fun pat -> pat.HospitalNumber = hn)
+                        |> List.tryFind (fun dto -> dto.HospitalNumber = s)
 
                     evs
                     |> List.fold (updateAdmittedPatients registered) pats
+
                 |> Projection.cacheFold []
 
             module Tests =
 
                 open Infrastructure
-                open Extensions
+                open InformedICU.Extensions
 
                 let store : EventStore<Event> =
                     EventStorage.InMemoryStorage.initialize []
@@ -1506,10 +1320,11 @@ module Domain =
                         create "2" "LastName" "FirstName" (DateTime.Now |> Some)
                         create "3" "LastName" "FirstName" (DateTime.Now |> Some)
                     ]
-                    |> List.map (Result.map Registered)
+                    |> List.map (Result.map (Dto.toDto >> Registered))
                     |> List.append [ "1" 
                                      |> HospitalNumber.create 
                                      |> Result.get
+                                     |> HospitalNumber.toString
                                      |> Admitted 
                                      |> Result.Ok ]
                     |> List.filter Result.isOk
@@ -1538,59 +1353,50 @@ module Domain =
             open Infrastructure
 
             type Command =
-                | Register of Dto
-                | Admit of string
+                | Register of bool * Dto
+                | Admit of bool * bool * string
                 | Discharge of string
 
 
-            let private isRegistered events hn =
-                events 
-                |> Projections.registeredPatients
-                |> List.exists (fun pat -> pat.HospitalNumber = hn)
+            let registerPatient isRegistered (dto : Dto) = 
 
-            let private isAdmitted events hn =
-                events
-                |> Projections.admittedPatients
-                |> List.exists (fun p -> p.HospitalNumber = hn)
-
-            let registerPatient pat events = 
-
-                if pat.HospitalNumber |> isRegistered events then 
-                    AllReadyRegistered pat.HospitalNumber
+                if isRegistered then 
+                    AllReadyRegistered dto.HospitalNumber
                 else 
-                    pat |> Registered
+                    dto |> Registered
                 |> List.singleton
 
-            let admitPatient hn events = 
-                match hn with
-                | _ when hn |> isRegistered events |> not -> 
-                    hn 
+            let admitPatient isRegistered isAdmitted s = 
+                match s with
+                | _ when isRegistered |> not -> 
+                    s 
                     |> UnknownHospitalNumber
                     |> List.singleton
-                | _ when hn |> isAdmitted events ->
-                    hn 
+                | _ when isAdmitted ->
+                    s 
                     |> AllReadyAdmitted
                     |> List.singleton
                 | _ ->
-                    events 
-                    |> Projections.registeredPatients
-                    |> List.filter (fun pat -> pat.HospitalNumber = hn)
-                    |> List.map (fun pat -> pat.HospitalNumber |> Admitted)                    
+                    s 
+                    |> Admitted
+                    |> List.singleton
 
             let behaviour : Behaviour<Command, Event> =
-                fun cmd evs ->
+                fun cmd -> 
                     match cmd with
-                    | Register dto -> 
+                    | Register (isRegistered, dto) -> 
                         match dto |> Dto.fromDto with
                         | Ok pat -> 
-                            evs
-                            |> registerPatient pat
+                            pat
+                            |> Dto.toDto
+                            |> registerPatient isRegistered
                         | Error e -> [ e |> InvalidPatient ]
-                    | Admit s ->
+                    | Admit (isRegistered, isAdmitted, s) ->
                         match s |> HospitalNumber.create with
                         | Result.Ok hn ->
-                            evs 
-                            |> admitPatient hn
+                            hn 
+                            |> HospitalNumber.toString
+                            |> admitPatient isRegistered isAdmitted
                         | Result.Error e -> 
                             e 
                             |> List.map HospitalNumberEvent
@@ -1600,7 +1406,7 @@ module Domain =
             module Tests =
 
                 open Infrastructure
-                open Extensions
+                open InformedICU.Extensions
 
                 type Command = TestRegisterPatient
     
@@ -1610,15 +1416,17 @@ module Domain =
                     |> EventStore.initialize
 
                 let behaviour : Behaviour<Command, Event> =
-                    fun cmd ees ->
+                    fun cmd ->
                         match cmd with
                         | TestRegisterPatient -> 
                             let pat = 
                                 new DateTime(1965, 12, 7)
                                 |> Some
                                 |> create "1" "Test" "Test"
-                            ees
-                            |> registerPatient (pat |> Result.get)
+                                |> Result.get
+                            pat
+                            |> Dto.toDto
+                            |> registerPatient true
 
                 let handler =
                     CommandHandler.initialize behaviour store
@@ -1668,45 +1476,45 @@ module Domain =
                 | OnlyDischarged
 
 
-            let hasHospitalNumber (HospitalNumber n) p = p.HospitalNumber = n
-
 
             let registered () : ReadModel<_, _> =
-                let updateState state evs =
+                let updateState (state : RegisteredPatient list) evs =
                     evs
                     |> Event.asEvents
-                    |> List.fold (fun state e ->
+                    |> List.fold (fun (state : RegisteredPatient list) e ->
                         match e with 
-                        | Registered p ->
+                        | Registered dto ->
                             let exists =
                                 state
-                                |> List.exists (hasHospitalNumber p.HospitalNumber)
+                                |> List.exists (fun p ->
+                                    p.HospitalNumber = dto.HospitalNumber
+                                )
                             if exists then state
                             else
                                 {
                                     HospitalNumber = 
-                                        p.HospitalNumber |> HospitalNumber.toString
+                                        dto.HospitalNumber 
                                     LastName = 
-                                        p.LastName |> Name.toString
+                                        dto.LastName 
                                     FirstName =
-                                        p.FirstName |> Name.toString
+                                        dto.FirstName
                                     Admitted = false
                                     Discharged = false
                                 }
                                 |> List.singleton
                                 |> List.append state
-                        | Admitted hn ->
+                        | Admitted s ->
                             state
                             |> List.map (fun p ->
-                                if p |> hasHospitalNumber hn |> not then p
+                                if p.HospitalNumber = s |> not then p
                                 else
                                     { p with Admitted = true
                                              Discharged = false }
                             )
-                        | Discharged hn ->
+                        | Discharged s ->
                             state
                             |> List.map (fun p ->
-                                if p |> hasHospitalNumber hn |> not then p
+                                if p.HospitalNumber = s |> not then p
                                 else
                                     { p with Admitted = false
                                              Discharged = true }
@@ -1777,19 +1585,12 @@ module App =
         | SomeOtherQuery
 
 
-    let behaviour cmd evs =
+    let behaviour cmd =
         match cmd with
         | PatientCommand c ->
-            evs
-            |> List.fold (fun acc e -> 
-                match e with
-                | PatientEvent pe -> 
-                    [ pe ] |> List.append acc
-                | _ -> acc
-            ) []
-            |> Patient.Behaviour.behaviour c
+            Patient.Behaviour.behaviour c
             |> List.map PatientEvent
-        | _ -> evs
+        | _ -> []
 
 
     let mapPatientModel model =
@@ -1838,17 +1639,17 @@ module App =
                 ]
         }
 
-    let private app = EventSourced<Command, 
+    let init () = EventSourced<Command, 
                                     Event, 
                                     Query>(config)
 
-    let handleCommand = app.HandleCommand streamId
+    let handleCommand app = EventSourced.handleCommand app streamId // app.HandleCommand streamId
 
-    let getStream  () = app.GetStream streamId
+    let getStream app = EventSourced.getStream app streamId
 
-    let getAllEvents = app.GetAllEvents
+    let getAllEvents app = (EventSourced.getAllEvents app) ()
 
-    let handleQuery = app.HandleQuery
+    let handleQuery app = EventSourced.handleQuery app
 
 
 
@@ -1856,14 +1657,17 @@ open System
 open Infrastructure
 open Domain
 
+let app = App.init ()
+
 let dto = Patient.Dto.dto ()
-dto.HospitalNumber <- "1"
+dto.HospitalNumber <- "0"
 dto.FirstName <- "Test2"
 dto.LastName <- "Test2"
 dto.BirthDate <- DateTime.Now.AddDays(-2000.) |> Some
 
-let count () =
-    App.getAllEvents ()
+let count app =
+    app
+    |> App.getAllEvents
     |> Async.RunSynchronously
     |>  (fun r ->
         match r with
@@ -1873,8 +1677,8 @@ let count () =
         | Error _ -> 0
     )
 
-let perform n =
-    let c = count ()
+let perform n app =
+    let c = count app
     for _ in [1..n] do
         let n = 
             dto.HospitalNumber
@@ -1884,29 +1688,60 @@ let perform n =
             |> string
         // System.Threading.Thread.Sleep(1000)
         dto.HospitalNumber <- n //|> string
-        dto
-        |> Patient.Behaviour.Register
+
+        let isRegistered =
+            Domain.Patient.ReadModels.GetRegistered
+            |> App.PatientQuery
+            |> App.handleQuery app
+            |> Async.RunSynchronously
+            |> function
+            | Handled obj ->
+                obj 
+                :?> Domain.Patient.ReadModels.RegisteredPatient list
+                |> List.exists (fun p ->
+                    p.HospitalNumber = dto.HospitalNumber
+                )
+            | _ -> false
+                
+
+        Patient.Behaviour.Register (isRegistered, dto)
         |> App.PatientCommand
-        |> App.handleCommand
+        |> App.handleCommand app
         |> Async.RunSynchronously
         |> ignore
 
-    while not (count () = n + c) do ()
+    while not (count app = n + c) do ()
     
-    printfn "count: %i" (count ())
+    printfn "count: %i" (count app)
 
-            
-App.getStream ()
-|> Async.RunSynchronously
-|> Helper.printEvents "Patients Events"
+let printEvents app =            
+    app
+    |>App.getStream 
+    |> Async.RunSynchronously
+    |> function
+    | Ok evs -> 
+        evs 
+        |> List.iter (fun e ->
+            match e.Event with 
+            | App.PatientEvent pe ->
+                match pe with
+                | Patient.Registered dto -> 
+                    dto
+                    |> Patient.Dto.toString
+                    |> printfn "%s"
+                | _ -> ()
+            | _ -> ()
+        )
+    | _ -> ()
 
-App.getAllEvents ()
+app
+|> App.getAllEvents
 |> Async.RunSynchronously
 |> Helper.printEvents "All Events"
 
 Domain.Patient.ReadModels.GetRegistered
 |> App.PatientQuery
-|> App.handleQuery 
+|> App.handleQuery app
 |> Async.RunSynchronously
 |> function
 | Handled obj ->
@@ -1917,17 +1752,17 @@ Domain.Patient.ReadModels.GetRegistered
 
 Domain.Patient.ReadModels.GetRegistered
 |> App.PatientQuery
-|> App.handleQuery 
+|> App.handleQuery app
 |> Async.RunSynchronously
 |> function
 | Handled obj ->
     obj 
     :?> Domain.Patient.ReadModels.RegisteredPatient list
     |> List.iter (fun pat ->
-        pat.HospitalNumber
-        |> Patient.Behaviour.Admit
+        
+        Patient.Behaviour.Admit (true, true, pat.HospitalNumber)
         |> App.PatientCommand
-        |> App.handleCommand
+        |> App.handleCommand app
         |> Async.RunSynchronously
         |> ignore
     )
@@ -1936,7 +1771,7 @@ Domain.Patient.ReadModels.GetRegistered
 
 Domain.Patient.ReadModels.OnlyAdmitted
 |> App.PatientQuery
-|> App.handleQuery 
+|> App.handleQuery app
 |> Async.RunSynchronously
 |> function
 | Handled obj ->
@@ -1958,7 +1793,7 @@ for i in [1..1000] do
     |> Patient.Dto.fromDto
     |> (printfn "%A")
 
-Extensions.Result.Tests.Test.run ()
+InformedICU.Extensions.Result.Tests.Test.run ()
 Domain.Patient.Behaviour.Tests.run ()
 
 
