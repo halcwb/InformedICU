@@ -10,36 +10,24 @@ module Patient =
 
     module HospitalNumber =
             
-        open InformedICU.Domain.Types.HospitalNumber
-
         let create s = HospitalNumber s
 
         let validate : ValidateHospitalNumber = 
             fun s ->
                 if s = "" then 
                     "Hospital number cannot be an empty string"
-                    |> Invalid
                     |> List.singleton
                     |> Result.Error
                 else 
                     s 
                     |> HospitalNumber
-                    |> Valid
-                    |> List.singleton
                     |> Result.Ok
 
         let toString (HospitalNumber s) = s
 
-        let eventToHospitalNumber = function
-            | Valid hn -> hn
-            | Invalid err -> err |> exn |> raise
-
         let eqsString s (HospitalNumber n) = s = n
 
-
     module Name =
-
-        open InformedICU.Domain.Types.Name
 
         let create s = Name s
 
@@ -47,27 +35,19 @@ module Patient =
             fun msg s ->
                 if s = "" then 
                     sprintf "%s cannot be an empty string" msg
-                    |> Invalid         
                     |> List.singleton
                     |> Result.Error
                 else 
                     s 
                     |> Name
-                    |> Valid
-                    |> List.singleton
                     |> Result.Ok
 
         let toString (Name s) = s
-
-        let eventToName = function
-            | Valid n -> n
-            | Invalid err -> err |> exn |> raise
 
 
     module BirthDate =
 
         open System
-        open InformedICU.Domain.Types.BirthDate
 
         let currentAgeInDays (BirthDate bd) = 
             (DateTime.Now - bd).TotalDays
@@ -83,85 +63,139 @@ module Patient =
                     match age with
                     | _ when age < 0. ->
                         sprintf "A birthdate of %A results in a negative age" dt
-                        |> Invalid
                         |> List.singleton
                         |> Result.Error 
                     | _ when age > (120. * 365.) ->
                         sprintf "A birthdate of %A results in an age > 120 years" dt
-                        |> Invalid
                         |> List.singleton
                         |> Result.Error 
                     | _ -> 
                         bd
-                        |> Valid
-                        |> List.singleton
                         |> Result.Ok
                 | None -> 
                     "Birthdate cannot be empty"
-                    |> Invalid
                     |> List.singleton
                     |> Result.Error
 
         let toDate (BirthDate dt) = dt
 
-        let eventToBirthDate = function
-            | Valid bd -> bd
-            | Invalid err  -> err |> exn |> raise  
-
-    let create hn ln fn bd =
+    let createDetails ln fn bd =
         {
-            HospitalNumber = hn |> HospitalNumber.create
             LastName = ln |> Name.create
             FirstName = fn |> Name.create
             BirthDate = BirthDate.create bd
         }
 
-    let register : RegisterPatient =
-        fun vhn vnm vbd dto ->
-            let f hne lne fne bde =
-                let hn = List.head >> HospitalNumber.eventToHospitalNumber 
-                let nm = List.head >> Name.eventToName
-                let bd = List.head >> BirthDate.eventToBirthDate
+    let validateDetails : ValidateDetails =
+        fun vnm vbd dto ->
+            let f ln fn bd =
                 {
-                    HospitalNumber = hne |> hn
-                    LastName = lne |> nm
-                    FirstName = fne |> nm
-                    BirthDate = bde |> bd
+                    LastName = ln
+                    FirstName = fn
+                    BirthDate = bd
                 }
-                |> Patient.Registered
-                |> PatientEvent
-                |> List.singleton
-                |> List.append (bde |> List.map BirthDateEvent )
-                |> List.append (fne |> List.map NameEvent )
-                |> List.append (lne |> List.map NameEvent )
-                |> List.append (hne |> List.map HospitalNumberEvent )
 
             f
-            <!> (Result.mapErrorList HospitalNumberEvent (dto.HospitalNumber |> vhn))
-            <*> (Result.mapErrorList NameEvent (dto.LastName |> vnm "Last name"))
-            <*> (Result.mapErrorList NameEvent (dto.FirstName |> vnm "First name"))
-            <*> (Result.mapErrorList BirthDateEvent (dto.BirthDate |> vbd))
+            <!> (dto.LastName |> vnm "Last name")
+            <*> (dto.FirstName |> vnm "First name")
+            <*> (dto.BirthDate |> vbd)
 
+    let private _validateDetails = 
+        validateDetails Name.validate BirthDate.validate
+
+    let registerPatient : RegisterPatient =
+        fun vhn s pd ->
+            let f hn ds : RegisteredPatient =
+                {
+                    HospitalNumber = hn
+                    Patient = ds
+                }
+
+            f 
+            <!> (s |> vhn)
+            <*> (pd |> Result.Ok)
+
+    let changeDetails : ChangeDetails =
+        fun _ dto dts ->
+            let f oldd newd =
+                {
+                    OldDetails = oldd
+                    NewDetails = newd
+                }
+
+            f
+            <!> (dts |> Result.Ok)
+            <*> (dto |> _validateDetails)
+
+    let private _changeDetails = changeDetails (fun _ _ -> _validateDetails)
+
+    let lastEvent = List.rev >> List.tryHead
+
+    let getDetails es =
+        es 
+        |> List.fold (fun s e ->
+            match e with
+            | Validated pd -> Some pd
+            | Changed pd ->
+                pd.NewDetails |> Some
+            | _ -> s
+        ) None
+
+    let processCommand : ProcessCommand = 
+        fun cmd es ->
+            match cmd with
+            | Validate dto ->
+                dto
+                |> _validateDetails
+                |> Result.map (Validated >> List.singleton)
+            | Register s ->
+                match es |> lastEvent with
+                | Some pat ->
+                    match pat with
+                    | Validated pd ->
+                        pd
+                        |> registerPatient HospitalNumber.validate s
+                        |> Result.map (Registered >> List.singleton)
+                    | _ ->
+                        "the patient is already registered"
+                        |> List.singleton
+                        |> Result.Error
+                | None -> 
+                    "an unknown patient cannot be registered"
+                    |> List.singleton
+                    |> Result.Error
+            | Change dto ->
+                match es |> getDetails with
+                | Some pd -> 
+                    pd
+                    |> _changeDetails dto
+                    |> Result.map (Changed >> List.singleton)
+                | None ->
+                    "there are no patient details to change"
+                    |> List.singleton
+                    |> Result.Error
+            | _ -> "cannot process command yet" |> exn |> raise
+
+            |> Result.map (List.append es)
+        
 
     module Dto = 
 
-        open InformedICU.Domain.Types.Patient
+        open InformedICU.Domain.Types.PatientDetails
 
         let dto () = new Dto () 
 
-        let toDto (pat : Patient) =
+        let toDto (pat : PatientDetails) =
             let dto = dto ()
-            dto.HospitalNumber <- pat.HospitalNumber |> HospitalNumber.toString
             dto.FirstName <- pat.FirstName |> Name.toString
             dto.LastName <- pat.LastName |> Name.toString
             dto.BirthDate <- pat.BirthDate |> BirthDate.toDate |> Some
             dto
 
         let fromDto (dto : Dto) =
-            create dto.HospitalNumber
-                   dto.LastName
-                   dto.FirstName
-                   (dto.BirthDate |> Option.get)
+            createDetails dto.LastName
+                          dto.FirstName
+                          (dto.BirthDate |> Option.get)
 
         let toString (dto: Dto) =
             let ds = 
@@ -172,7 +206,6 @@ module Patient =
                 )
                 |> Option.defaultValue ""
             sprintf "%s: %s, %s %s"
-                    dto.HospitalNumber
                     dto.LastName
                     dto.FirstName
                     ds

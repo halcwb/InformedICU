@@ -2,77 +2,106 @@
 
 open System
 
+type Errors = string list
+
 type Description = string
 
 type HospitalNumber = HospitalNumber of string
 
-module HospitalNumber =
-
-    type Event = 
-        | Valid of HospitalNumber
-        | Invalid of Description
-
 type Name = Name of string
-
-module Name =
-
-    type Event =
-        | Valid of Name
-        | Invalid of Description
 
 type BirthDate = BirthDate of DateTime
 
-module BirthDate =
+type AdmissionDate = AdmissionDate of DateTime
 
-    type Event = 
-        | Valid of BirthDate
-        | Invalid of Description
+type DischargeDate = DischargeDate of DateTime
 
 [<NoComparison>]
-type Patient =
+type PatientDetails =
     {
-        HospitalNumber : HospitalNumber
         LastName : Name
         FirstName : Name
         BirthDate : BirthDate
     }
 
-module Patient =
-
-    type Dto () = 
-        member val HospitalNumber  = "" with get, set
+module PatientDetails =
+    
+    type Dto () =
         member val LastName = "" with get, set
         member val FirstName = "" with get, set
-        member val BirthDate : DateTime Option = None with get, set
+        member val BirthDate : DateTime option = None with get, set
 
-    type Event =
-        | Registered of Patient
-        | AllReadyRegistered of HospitalNumber
-        | Admitted of HospitalNumber
-        | Discharged of HospitalNumber
-        | Invalid of Description * Dto
+type RegisteredPatient =
+    {
+        HospitalNumber : HospitalNumber
+        Patient : PatientDetails
+    }
+
+type PatientAdmission =
+    {
+        HospitalNumber : HospitalNumber
+        AdmissionDate : AdmissionDate
+    }
+
+type PatientDischarge =
+    {
+        HospitalNumber : HospitalNumber
+        DischargeDate : DischargeDate
+    }
+
+type ChangedDetails =
+    {
+        OldDetails : PatientDetails
+        NewDetails : PatientDetails
+    }
 
 type Event =
-    | HospitalNumberEvent of HospitalNumber.Event
-    | NameEvent of Name.Event
-    | BirthDateEvent of BirthDate.Event
-    | PatientEvent of Patient.Event
+    | Validated of PatientDetails
+    | Registered of RegisteredPatient
+    | Changed of ChangedDetails
+    | Admitted of PatientAdmission
+    | Discharged of PatientDischarge
 
-type EventResult<'Event> = Result<'Event list, 'Event list>
+type ValidateHospitalNumber = string -> Result<HospitalNumber, Errors>
 
-type ValidateHospitalNumber = 
-    string -> EventResult<HospitalNumber.Event>
+type ValidateName = Description -> string -> Result<Name, Errors>
 
-type ValidateName = 
-    Description -> string -> EventResult<Name.Event>
+type ValidateBirthDate = DateTime Option -> Result<BirthDate, Errors>
 
-type ValidateBirthDate = 
-    DateTime option -> EventResult<BirthDate.Event>
+type ValidateDetails = 
+    ValidateName
+        -> ValidateBirthDate
+        -> PatientDetails.Dto 
+        -> Result<PatientDetails, Errors>
 
 type RegisterPatient = 
-    ValidateHospitalNumber
-        -> ValidateName 
-            -> ValidateBirthDate
-                -> Patient.Dto 
-                    -> EventResult<Event>
+    ValidateHospitalNumber 
+        -> string 
+        -> PatientDetails 
+        -> Result<RegisteredPatient, Errors>
 
+type ChangeDetails = 
+    ValidateDetails 
+        -> PatientDetails.Dto
+        -> PatientDetails 
+        -> Result<ChangedDetails, Errors>
+
+type AdmitPatient = 
+    AdmissionDate 
+        -> Result<PatientAdmission, Errors>
+
+type DischargePatient = 
+    DischargeDate 
+        -> PatientAdmission 
+        -> Result<PatientDischarge, Errors>
+
+type EventResult = Result<Event list, Errors>
+
+type Command =
+    | Validate of PatientDetails.Dto
+    | Register of string
+    | Change of PatientDetails.Dto
+    | Admit 
+    | Discharge 
+
+type ProcessCommand = Command -> Event list -> EventResult

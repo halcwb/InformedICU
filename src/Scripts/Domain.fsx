@@ -10,6 +10,7 @@
 open System
 
 open InformedICU.Extensions
+open InformedICU.Extensions.Result.Operators
 open InformedICU.Domain.Types
 open InformedICU.Domain
 
@@ -21,13 +22,15 @@ open InformedICU.Domain
 
 let dto = Patient.Dto.dto ()
 
-dto.HospitalNumber <- "1"
 dto.LastName <- "Test"
 dto.FirstName <- "Test"
 dto.BirthDate <- DateTime.Now |> Some
 
 dto
-|> Patient.register Patient.HospitalNumber.validate
-                    Patient.Name.validate
-                    Patient.BirthDate.validate
+|> Patient.validateDetails Patient.Name.validate
+                           Patient.BirthDate.validate
 
+[] |> Result.Ok
+>>= Patient.processCommand (Validate dto)
+>>= (Patient.processCommand (Register "1"))
+>>= (Patient.processCommand (Change dto))

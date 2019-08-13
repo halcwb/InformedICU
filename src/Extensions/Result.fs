@@ -52,9 +52,7 @@ module Result =
 
     module Operators = 
     
-        let (>>=) = Result.bind
-
-        let (<<=) x f = Result.bind f x
+        let (>>=) x f = Result.bind f x
 
         let (>=>) f1 f2 = f1 >> f2
 
