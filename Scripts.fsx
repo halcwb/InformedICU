@@ -1640,8 +1640,8 @@ module App =
         }
 
     let init () = EventSourced<Command, 
-                                    Event, 
-                                    Query>(config)
+                               Event, 
+                               Query>(config)
 
     let handleCommand app = EventSourced.handleCommand app streamId // app.HandleCommand streamId
 

@@ -3,31 +3,36 @@
 type EventSourcedConfig<'Comand,'Event,'Query> =
     {
         EventStorageInit : unit -> EventStorage<'Event>
+        EventStoreInit : EventStorage<'Event> -> EventStore<'Event>
         CommandHandlerInit : EventStore<'Event> -> CommandHandler<'Comand>
         QueryHandler : QueryHandler<'Query>
         EventHandlers : EventHandler<'Event> list
     }
 
 
-type EventSourced<'Comand,'Event,'Query> (configuration : EventSourcedConfig<'Comand,'Event,'Query>) =
+type EventSourced<'Comand,'Event,'Query> (config : EventSourcedConfig<'Comand,'Event,'Query>) =
 
-    let eventStorage = configuration.EventStorageInit()
+    let eventStorage = config.EventStorageInit()
 
-    let eventStore = EventStore.initialize eventStorage
+    let eventStore = config.EventStoreInit eventStorage
 
-    let commandHandler = configuration.CommandHandlerInit eventStore
+    let commandHandler = config.CommandHandlerInit eventStore
 
-    let queryHandler = configuration.QueryHandler
+    let queryHandler = config.QueryHandler
 
     let eventListener = EventListener.initialize ()
 
     do
         eventStore.OnError.Add(fun exn -> 
             Utils.printError (sprintf "EventStore Error: %s" exn.Message) exn)
+        
         commandHandler.OnError.Add(fun exn -> 
             Utils.printError (sprintf "CommandHandler Error: %s" exn.Message) exn)
+        
         eventStore.OnEvents.Add eventListener.Notify
-        configuration.EventHandlers |> List.iter eventListener.Subscribe
+        
+        config.EventHandlers 
+        |> List.iter eventListener.Subscribe
 
     member __.HandleCommand streamId command =
         commandHandler.Handle streamId command
