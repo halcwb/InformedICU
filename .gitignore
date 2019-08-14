@@ -69,7 +69,7 @@ publishnuget.cmd
 !/src/EventSourced/
 !/src/EventSourced/Utils/
 !/src/EventSourced/EventStorage/
-!/src/Api/
+!/src/Application/
 !/src/Scripts/
 
 # Add test files
