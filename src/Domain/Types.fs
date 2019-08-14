@@ -12,9 +12,9 @@ type Name = Name of string
 
 type BirthDate = BirthDate of DateTime
 
-type AdmissionDate = AdmissionDate of DateTime
+type AdmissionDate = DateTime
 
-type DischargeDate = DischargeDate of DateTime
+type DischargeDate = DateTime
 
 [<NoComparison>]
 type PatientDetails =
@@ -38,13 +38,11 @@ type RegisteredPatient =
 
 type PatientAdmission =
     {
-        HospitalNumber : HospitalNumber
         AdmissionDate : AdmissionDate
     }
 
 type PatientDischarge =
     {
-        HospitalNumber : HospitalNumber
         DischargeDate : DischargeDate
     }
 
@@ -93,6 +91,9 @@ type ChangeDetails =
 
 type IsAdmitted = Event list -> bool
 
+type DischargeLaterThanAdmission = 
+    DischargeDate -> Event list -> bool
+
 type AdmitPatient = 
     IsRegistered
         -> IsAdmitted 
@@ -103,6 +104,7 @@ type AdmitPatient =
 type DischargePatient = 
     IsRegistered 
         -> IsAdmitted
+        -> DischargeLaterThanAdmission
         -> DischargeDate 
         -> Event list
         -> Result<PatientDischarge, Errors>
@@ -124,6 +126,7 @@ type Dependencies =
         HasDetails : HasDetails
         IsRegistered : IsRegistered
         IsAdmitted : IsAdmitted
+        DischargeLaterThanAdmission : DischargeLaterThanAdmission
     }
 
 type ProcessCommand = Dependencies -> Command -> Event list -> EventResult

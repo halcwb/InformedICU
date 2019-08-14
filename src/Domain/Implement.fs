@@ -161,6 +161,83 @@ module Patient =
                 |> Result.map f
             )
 
+    let isAdmitted es =
+        es
+        |> List.fold (fun _ e ->
+            match e with
+            | Admitted _ -> true
+            | _ -> false
+        ) false
+
+
+    let admitPatient : AdmitPatient =
+        fun isr isa ad es  ->
+            es
+            |> isr
+            |> function 
+            | true -> () |> Result.Ok
+            | false -> "cannot admit a patient that is not registered" |> Result.errorList
+            >>= (fun _ ->
+                if ad <= DateTime.Now then () |> Result.Ok
+                else "the admission date cannot be in the futer" |> Result.errorList
+            )
+            >>= (fun _ ->
+                es
+                |> isa
+                |> function 
+                | true -> "patient is already admitted" |> Result.errorList
+                | false -> () |> Result.Ok
+            )
+            >>= (fun _ ->
+                {
+                    AdmissionDate = ad
+                } |> Result.Ok
+            )
+
+    let dischargeLaterThanAdmission : DischargeLaterThanAdmission =
+        fun dd es ->
+            es
+            |> List.fold (fun s e ->
+                match e with
+                | Admitted d -> Some d.AdmissionDate
+                | Discharged _ -> None
+                | _ -> s
+            ) None
+            |> function
+            | Some ad -> dd >= ad
+            | _ -> false
+
+    let dischargePatient : DischargePatient =
+        fun isr isa dla dd es  ->
+            es
+            |> isr
+            |> function 
+            | true -> () |> Result.Ok
+            | false -> "cannot discharge a patient that is not registered" |> Result.errorList
+            >>= (fun _ ->
+                if dd <= DateTime.Now then () |> Result.Ok
+                else "the discharge date cannot be in the futer" |> Result.errorList
+            )
+            >>= (fun _ ->
+                es
+                |> isa
+                |> function 
+                | true -> () |> Result.Ok
+                | false ->  "patient is not admitted" |> Result.errorList
+            )
+            >>= (fun _ ->
+                es
+                |> dla dd
+                |> function 
+                | true -> () |> Result.Ok
+                | false -> "patient cannot be discharged before admission" |> Result.errorList
+            )
+            >>= (fun _ ->
+                {
+                    DischargeDate = dd
+                } |> Result.Ok
+            )
+
 
     let processCommand : ProcessCommand = 
         fun dep cmd es ->
@@ -182,10 +259,18 @@ module Patient =
                     hasDetails
                     validateDetails dto
                 |> Result.map (Changed >> List.singleton)
-            | _ -> "cannot process command yet" |> exn |> raise
-
-            |> Result.map (List.append es)
-        
+            | Admit ad ->
+                es
+                |> admitPatient dep.IsRegistered dep.IsAdmitted ad
+                |> Result.map (Admitted >> List.singleton)
+            | Discharge dd ->
+                es
+                |> dischargePatient 
+                    dep.IsRegistered 
+                    dep.IsAdmitted
+                    dep.DischargeLaterThanAdmission dd
+                |> Result.map (Discharged >> List.singleton)
+            |> Result.map (List.append es)        
 
     module Dto = 
 

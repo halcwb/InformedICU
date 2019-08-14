@@ -22,14 +22,14 @@
     <Compile Include="EventSourced\QueryHandler.fs" />
     <Compile Include="EventSourced\ReadModel.fs" />
     <Compile Include="EventSourced\EventSourced.fs" />
-    <Compile Include="Library.fs" />
+    <Compile Include="Api\Patient.fs" />
     <None Include="Scripts\Agent.fsx" />
-    <None Include="Scripts\Domain.fsx" />
     <None Include="Scripts\InMemoryStorage.fsx" />
     <None Include="Scripts\FileStorage.fsx" />
     <None Include="Scripts\EventStore.fsx" />
     <None Include="Scripts\CommandHandler.fsx" />
     <None Include="Scripts\EventListener.fsx" />
+    <None Include="Scripts\Domain.fsx" />
   </ItemGroup>
   <Import Project="..\.paket\Paket.Restore.targets" />
 </Project>

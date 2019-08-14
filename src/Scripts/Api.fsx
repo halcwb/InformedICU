@@ -7,12 +7,15 @@
 #load "./../Domain/Types.fs"
 #load "./../Domain/Implement.fs"
 
+#load "./../Api/Patient.fs"
+
 open System
 
 open InformedICU.Extensions
 open InformedICU.Extensions.Result.Operators
 open InformedICU.Domain.Types
 open InformedICU.Domain
+open InformedICU.Api
 
 ""
 |> Patient.HospitalNumber.create
@@ -45,8 +48,24 @@ let processCommand =
 [] |> Result.Ok
 >>= processCommand (Validate dto)
 >>= (processCommand (Register "1"))
-//>>= (processCommand (Register "1"))
+>>= (fun es ->
+    dto.FirstName <- "Walter"
+    dto.LastName <- "Goodman"
+
+    es |> Result.Ok
+)
 >>= (processCommand (Change dto))
+>>= (processCommand (Admit (DateTime.Now.AddDays(-10.))))
+>>= (processCommand (Discharge (DateTime.Now.AddDays(-5.))))
 >>= (processCommand (Admit (DateTime.Now.AddDays(-1.))))
->>= (processCommand (Discharge (DateTime.Now.AddDays(0.))))
+>>= (fun es ->
+    es
+    |> Patient.Projections.patientInfo
+    |> printfn "%A"
+
+    () |> Result.Ok
+)
+
+
+
 
