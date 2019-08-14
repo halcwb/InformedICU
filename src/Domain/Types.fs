@@ -57,6 +57,7 @@ type Event =
     | Changed of ChangedDetails
     | Admitted of PatientAdmission
     | Discharged of PatientDischarge
+    | Errors of Description list
 
 type ValidateHospitalNumber = string -> Result<HospitalNumber, Errors>
 

@@ -25,13 +25,17 @@ module CommandHandler =
                             |> function
                             | Ok es ->
                                 let latest = es |> Event.latestVersion
-                                
+
                                 es
                                 |> Event.removeMetaData
                                 |> workflow command
                                 |> Event.addMetaData latest streamId
+                                |> (fun es -> 
+                                    printfn "%A" es
+                                    es
+                                )
                                 |> Ok
-                            | Error _ -> stream
+                            | Error err -> err |> Error
 
                         let! result = 
                             events

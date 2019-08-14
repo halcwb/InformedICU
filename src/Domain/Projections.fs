@@ -1,4 +1,4 @@
-﻿namespace InformedICU.Api
+﻿namespace InformedICU.Domain.Projections
 
 module Patient =
 
@@ -76,8 +76,12 @@ module Patient =
                                 |> List.rev
                             | _ -> s.Admissions
                 }
+            | _ -> s
 
         let patientInfo es = es |> List.fold updatePatient empty
+
+
+
 
 
 

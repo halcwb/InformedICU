@@ -25,9 +25,12 @@ type Event = | HelloWorld
 type Command = SayHello
 
 let store n : EventStore<Event> = 
-    HelloWorld
-    |> List.replicate n
-    |> Event.addMetaData 0 streamId
+    if n = 0 then
+        List.empty
+    else
+        HelloWorld
+        |> List.replicate n
+        |> Event.addMetaData 0 streamId
     |> InMemoryStorage.initialize
     |> EventStore.initialize 
 

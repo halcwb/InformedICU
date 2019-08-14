@@ -1,13 +1,31 @@
 ﻿#I __SOURCE_DIRECTORY__
 
+#load "./../../.paket/load/netcoreapp2.2/Npgsql.fsx"
+#load "./../../.paket/load/netcoreapp2.2/main.group.fsx"
+// Extensions
 #load "./../Extensions/List.fs"
 #load "./../Extensions/Option.fs"
+#load "./../Extensions/Async.fs"
 #load "./../Extensions/Result.fs"
-
+// Domain
 #load "./../Domain/Types.fs"
 #load "./../Domain/Implement.fs"
-
-#load "./../Api/Patient.fs"
+#load "./../Domain/Projections.fs"
+// EventSourced
+#load "./../Agent/Agent.fs"
+#load "./../EventSourced/Types.fs"
+#load "./../EventSourced/Event.fs"
+#load "./../EventSourced/Projection.fs"
+#load "./../EventSourced/Utils/Utils.fs"
+#load "./../EventSourced/EventStorage/InMemoryStorage.fs"
+#load "./../EventSourced/EventStore.fs"
+#load "./../EventSourced/CommandHandler.fs"
+#load "./../EventSourced/EventListener.fs"
+#load "./../EventSourced/QueryHandler.fs"
+#load "./../EventSourced/ReadModel.fs"
+#load "./../EventSourced/EventSourced.fs"
+// Application
+#load "./../Application/Api.fs"
 
 open System
 
@@ -15,13 +33,8 @@ open InformedICU.Extensions
 open InformedICU.Extensions.Result.Operators
 open InformedICU.Domain.Types
 open InformedICU.Domain
-open InformedICU.Api
-
-""
-|> Patient.HospitalNumber.create
-
-"123"
-|> Patient.HospitalNumber.create
+open InformedICU.Domain.Projections
+open InformedICU.Application.Api
 
 let dto = Patient.Dto.dto ()
 
@@ -29,43 +42,29 @@ dto.LastName <- "Test"
 dto.FirstName <- "Test"
 dto.BirthDate <- DateTime.Now |> Some
 
-dto
-|> Patient.validateDetails Patient.Name.validate
-                           Patient.BirthDate.validate
+let app = App.init ()
 
-let processCommand =
-    {
-        ValidateHospitalNumber = Patient.HospitalNumber.validate
-        ValidateName = Patient.Name.validate
-        ValidateBirthDate = Patient.BirthDate.validate
-        HasDetails = Patient.hasDetails
-        IsRegistered = Patient.isRegistered
-        IsAdmitted = Patient.isAdmitted
-        DischargeLaterThanAdmission = Patient.dischargeLaterThanAdmission
-    }
-    |> Patient.processCommand
+let streamId = Guid.NewGuid().ToString()
 
-[] |> Result.Ok
->>= processCommand (Validate dto)
->>= (processCommand (Register "1"))
->>= (fun es ->
-    dto.FirstName <- "Walter"
-    dto.LastName <- "Goodman"
-
-    es |> Result.Ok
-)
->>= (processCommand (Change dto))
->>= (processCommand (Admit (DateTime.Now.AddDays(-10.))))
->>= (processCommand (Discharge (DateTime.Now.AddDays(-5.))))
->>= (processCommand (Admit (DateTime.Now.AddDays(-1.))))
->>= (fun es ->
-    es
-    |> Patient.Projections.patientInfo
-    |> printfn "%A"
-
-    () |> Result.Ok
-)
+[
+    (Validate dto)
+    (Register "2")
+]
+|> List.map ((app.HandleCommand streamId) >> Async.RunSynchronously)
+|> printfn "%A"
 
 
+app.GetAllEvents ()
+|> Async.RunSynchronously
+|> function
+| Ok es -> 
+    es 
+    |> List.iter (fun e -> 
+        e.Metadata.EventVersion |> printfn "version: %i"
+        e.Event |> printfn "%A"
+    )
+| Error err -> printfn "%A" err
 
 
+app.HandleQuery (Patient.ReadModels.GetRegistered)
+|> Async.RunSynchronously

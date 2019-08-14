@@ -270,7 +270,6 @@ module Patient =
                     dep.IsAdmitted
                     dep.DischargeLaterThanAdmission dd
                 |> Result.map (Discharged >> List.singleton)
-            |> Result.map (List.append es)        
 
     module Dto = 
 

@@ -47,5 +47,11 @@ module Projection =
             cache.State <- state |> Some
             state
 
-
+    let projectIntoMap init update =
+      fun state event ->
+        state
+        |> Map.tryFind event.Metadata.StreamId
+        |> Option.defaultValue init
+        |> fun projectionState -> event.Event |> update projectionState
+        |> fun newState -> state |> Map.add event.Metadata.StreamId newState
 

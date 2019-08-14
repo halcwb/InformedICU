@@ -16,7 +16,7 @@ module Event =
         let now = System.DateTime.UtcNow
         let eventId = System.Guid.NewGuid ()
 
-        let envelope version event =
+        let add version event =
             {
                 Metadata = {
                     EventId = eventId
@@ -27,7 +27,7 @@ module Event =
                 Event = event
             }
 
-        events |> List.mapi (fun i e -> e|> envelope (latestVersion + i))
+        events |> List.mapi (fun i e -> e|> add (latestVersion + i + 1))
 
     let removeMetaData events =
         events |> List.map (fun e -> e.Event)
