@@ -34,7 +34,6 @@ module PatientDetails =
 type RegisteredPatient =
     {
         HospitalNumber : HospitalNumber
-        Patient : PatientDetails
     }
 
 type PatientAdmission =
@@ -51,7 +50,6 @@ type PatientDischarge =
 
 type ChangedDetails =
     {
-        OldDetails : PatientDetails
         NewDetails : PatientDetails
     }
 
@@ -74,25 +72,39 @@ type ValidateDetails =
         -> PatientDetails.Dto 
         -> Result<PatientDetails, Errors>
 
+type HasDetails = Event list -> bool
+
+type IsRegistered = Event list -> bool
+
 type RegisterPatient = 
-    ValidateHospitalNumber 
+    HasDetails 
+        -> IsRegistered
+        -> ValidateHospitalNumber 
         -> string 
-        -> PatientDetails 
+        -> Event list
         -> Result<RegisteredPatient, Errors>
 
 type ChangeDetails = 
-    ValidateDetails 
+    HasDetails
+        -> ValidateDetails 
         -> PatientDetails.Dto
-        -> PatientDetails 
+        -> Event list
         -> Result<ChangedDetails, Errors>
 
+type IsAdmitted = Event list -> bool
+
 type AdmitPatient = 
-    AdmissionDate 
+    IsRegistered
+        -> IsAdmitted 
+        -> AdmissionDate 
+        -> Event list
         -> Result<PatientAdmission, Errors>
 
 type DischargePatient = 
-    DischargeDate 
-        -> PatientAdmission 
+    IsRegistered 
+        -> IsAdmitted
+        -> DischargeDate 
+        -> Event list
         -> Result<PatientDischarge, Errors>
 
 type EventResult = Result<Event list, Errors>
@@ -101,7 +113,17 @@ type Command =
     | Validate of PatientDetails.Dto
     | Register of string
     | Change of PatientDetails.Dto
-    | Admit 
-    | Discharge 
+    | Admit of AdmissionDate
+    | Discharge of DischargeDate
 
-type ProcessCommand = Command -> Event list -> EventResult
+type Dependencies =
+    {
+        ValidateHospitalNumber : ValidateHospitalNumber
+        ValidateName : ValidateName
+        ValidateBirthDate : ValidateBirthDate
+        HasDetails : HasDetails
+        IsRegistered : IsRegistered
+        IsAdmitted : IsAdmitted
+    }
+
+type ProcessCommand = Dependencies -> Command -> Event list -> EventResult

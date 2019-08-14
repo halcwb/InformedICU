@@ -30,7 +30,19 @@ dto
 |> Patient.validateDetails Patient.Name.validate
                            Patient.BirthDate.validate
 
+let processCommand =
+    {
+        ValidateHospitalNumber = Patient.HospitalNumber.validate
+        ValidateName = Patient.Name.validate
+        ValidateBirthDate = Patient.BirthDate.validate
+        HasDetails = Patient.hasDetails
+        IsRegistered = Patient.isRegistered
+        IsAdmitted = (fun _ -> true)
+    }
+    |> Patient.processCommand
+
 [] |> Result.Ok
->>= Patient.processCommand (Validate dto)
->>= (Patient.processCommand (Register "1"))
->>= (Patient.processCommand (Change dto))
+>>= processCommand (Validate dto)
+>>= (processCommand (Register "1"))
+//>>= (processCommand (Register "1"))
+>>= (processCommand (Change dto))

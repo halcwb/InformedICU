@@ -8,7 +8,7 @@
     <Compile Include="Extensions\Option.fs" />
     <Compile Include="Extensions\Result.fs" />
     <Compile Include="Domain\Types.fs" />
-    <Compile Include="Domain\Domain.fs" />
+    <Compile Include="Domain\Implement.fs" />
     <Compile Include="Agent\Agent.fs" />
     <Compile Include="EventSourced\Types.fs" />
     <Compile Include="EventSourced\Event.fs" />

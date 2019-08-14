@@ -16,8 +16,7 @@ module Patient =
             fun s ->
                 if s = "" then 
                     "Hospital number cannot be an empty string"
-                    |> List.singleton
-                    |> Result.Error
+                    |> Result.errorList
                 else 
                     s 
                     |> HospitalNumber
@@ -35,8 +34,7 @@ module Patient =
             fun msg s ->
                 if s = "" then 
                     sprintf "%s cannot be an empty string" msg
-                    |> List.singleton
-                    |> Result.Error
+                    |> Result.errorList
                 else 
                     s 
                     |> Name
@@ -67,15 +65,13 @@ module Patient =
                         |> Result.Error 
                     | _ when age > (120. * 365.) ->
                         sprintf "A birthdate of %A results in an age > 120 years" dt
-                        |> List.singleton
-                        |> Result.Error 
+                        |> Result.errorList 
                     | _ -> 
                         bd
                         |> Result.Ok
                 | None -> 
                     "Birthdate cannot be empty"
-                    |> List.singleton
-                    |> Result.Error
+                    |> Result.errorList
 
         let toDate (BirthDate dt) = dt
 
@@ -100,37 +96,6 @@ module Patient =
             <*> (dto.FirstName |> vnm "First name")
             <*> (dto.BirthDate |> vbd)
 
-    let private _validateDetails = 
-        validateDetails Name.validate BirthDate.validate
-
-    let registerPatient : RegisterPatient =
-        fun vhn s pd ->
-            let f hn ds : RegisteredPatient =
-                {
-                    HospitalNumber = hn
-                    Patient = ds
-                }
-
-            f 
-            <!> (s |> vhn)
-            <*> (pd |> Result.Ok)
-
-    let changeDetails : ChangeDetails =
-        fun _ dto dts ->
-            let f oldd newd =
-                {
-                    OldDetails = oldd
-                    NewDetails = newd
-                }
-
-            f
-            <!> (dts |> Result.Ok)
-            <*> (dto |> _validateDetails)
-
-    let private _changeDetails = changeDetails (fun _ _ -> _validateDetails)
-
-    let lastEvent = List.rev >> List.tryHead
-
     let getDetails es =
         es 
         |> List.fold (fun s e ->
@@ -141,39 +106,82 @@ module Patient =
             | _ -> s
         ) None
 
+    let hasDetails : HasDetails =
+        fun es ->
+            es 
+            |> getDetails
+            |> Option.isSome
+
+    let isRegistered : IsRegistered =
+        fun es ->
+            es 
+            |> List.fold (fun _ e ->
+                match e with
+                | Validated _ -> false
+                | _ -> true
+            ) false
+
+    let registerPatient : RegisterPatient =
+        fun hd ir vhn s es ->
+            let f hn : RegisteredPatient =
+                {
+                    HospitalNumber = hn
+                }
+            es
+            |> hd 
+            |> function 
+            | true -> () |> Result.Ok
+            | false -> "patient has no details" |> Result.errorList
+            >>= (fun _ -> 
+                es 
+                |> ir 
+                |> function
+                | true -> "patient is already registerd" |> Result.errorList
+                | false -> () |> Result.Ok
+            )
+            >>= (fun _ ->
+                (s |> vhn)
+                |> Result.map f    
+            )
+
+    let changeDetails vn vb : ChangeDetails =
+        fun hd vd dto es ->
+            let f newd =
+                {
+                    NewDetails = newd
+                }
+
+            es
+            |> hd
+            |> function 
+            | true -> () |> Result.Ok
+            | false -> "patient has no details to change" |> Result.errorList
+            >>= (fun _ ->
+                (dto |> vd vn vb)
+                |> Result.map f
+            )
+
+
     let processCommand : ProcessCommand = 
-        fun cmd es ->
+        fun dep cmd es ->
             match cmd with
             | Validate dto ->
                 dto
-                |> _validateDetails
+                |> validateDetails dep.ValidateName dep.ValidateBirthDate
                 |> Result.map (Validated >> List.singleton)
             | Register s ->
-                match es |> lastEvent with
-                | Some pat ->
-                    match pat with
-                    | Validated pd ->
-                        pd
-                        |> registerPatient HospitalNumber.validate s
-                        |> Result.map (Registered >> List.singleton)
-                    | _ ->
-                        "the patient is already registered"
-                        |> List.singleton
-                        |> Result.Error
-                | None -> 
-                    "an unknown patient cannot be registered"
-                    |> List.singleton
-                    |> Result.Error
+                es
+                |> registerPatient 
+                    dep.HasDetails 
+                    dep.IsRegistered
+                    dep.ValidateHospitalNumber s
+                |> Result.map (Registered >> List.singleton)
             | Change dto ->
-                match es |> getDetails with
-                | Some pd -> 
-                    pd
-                    |> _changeDetails dto
-                    |> Result.map (Changed >> List.singleton)
-                | None ->
-                    "there are no patient details to change"
-                    |> List.singleton
-                    |> Result.Error
+                es
+                |> changeDetails dep.ValidateName dep.ValidateBirthDate
+                    hasDetails
+                    validateDetails dto
+                |> Result.map (Changed >> List.singleton)
             | _ -> "cannot process command yet" |> exn |> raise
 
             |> Result.map (List.append es)

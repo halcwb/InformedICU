@@ -42,6 +42,11 @@ module Result =
         let f' =  f |> Result.Ok
         applyR (List.append) f' x
 
+    let errorList x = 
+        x 
+        |> List.singleton
+        |> Error
+
     let mapErrorList f x =
         match x with
         | Ok o -> o |> Ok
